@@ -13,6 +13,7 @@
 - Tin nhắn mới **báo hiệu realtime** cho mọi client qua WebSocket (chấm đỏ + số chưa đọc trong app — **không** đẩy push notification ra hệ điều hành).
 - Tin nhắn **tự động bị xóa sau 2 ngày** (dọn dẹp mỗi giờ bằng cron nội bộ).
 - Hỗ trợ **tag @username** trong phòng chat (autocomplete khi gõ `@`).
+- **Thả cảm xúc** vào từng tin nhắn (👍 ❤️ 😂 😮 😢 🙏) — bấm nút 😊 nổi trên bong bóng để chọn, mỗi người chỉ giữ 1 cảm xúc/tin nhắn (bấm lại cùng emoji để gỡ). Đây không phải xóa/thu hồi tin nhắn, chỉ là gắn thêm cảm xúc, cập nhật realtime cho mọi người qua WebSocket.
 - **Mã hóa đầu-cuối (E2E)**: nội dung text/ảnh/video được mã hóa AES-GCM ngay trên trình duyệt bằng khóa suy ra từ một **mật khẩu phòng chat** do bạn tự đặt và chia sẻ ngoài hệ thống (ví dụ nói miệng, nhắn Zalo riêng...). Server **chỉ lưu ciphertext**, không có khả năng đọc nội dung.
 
 ## Cấu trúc
@@ -56,4 +57,5 @@ Mở `http://localhost:3000`.
 - Gói Free của Render Postgres có giới hạn dung lượng/thời gian — phù hợp thử nghiệm nội bộ, cân nhắc gói trả phí nếu dùng lâu dài.
 - Vì tin nhắn/ảnh/video được mã hóa AES-GCM bằng "mật khẩu phòng chat" dùng chung, ai biết mật khẩu này đều đọc được toàn bộ nội dung — đây là mô hình E2E theo nhóm dùng khóa chia sẻ (không phải mã hóa theo từng cặp người dùng kiểu Signal). Nếu cần thu hồi quyền đọc lịch sử một cách triệt để, cần đổi mật khẩu phòng và thông báo lại cho các user còn hoạt động.
 - Trường `mentions` (danh sách username được @tag) được gửi dưới dạng metadata **không mã hóa** để phục vụ hiển thị/thông báo — bản thân nội dung tin nhắn vẫn được mã hóa đầy đủ.
+- Tương tự, **cảm xúc thả vào tin nhắn** (emoji + username người thả) cũng là metadata không mã hóa, lưu ở bảng `message_reactions` riêng, không đụng tới nội dung tin nhắn đã mã hóa.
 - File đính kèm giới hạn 15MB (do được mã hóa + encode base64 rồi gửi qua JSON); có thể tăng giới hạn trong `server.js` (`MAX_PAYLOAD_MB`) và `public/app.js` nếu cần, nhưng lưu ý gói Free của Render có giới hạn băng thông/bộ nhớ.
