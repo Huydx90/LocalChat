@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Chat nội bộ</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- ===== AUTH (login / register) ===== -->
+<section id="view-auth" class="view center-view hidden">
+  <div class="card">
+    <div class="brand">
+      <div class="brand-dot"></div>
+      <h1>Chat nội bộ</h1>
+    </div>
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="login">Đăng nhập</button>
+      <button class="tab-btn" data-tab="register">Đăng ký</button>
+    </div>
+
+    <form id="form-login" class="tab-panel">
+      <label>Tên đăng nhập</label>
+      <input id="login-username" autocomplete="username" required>
+      <label>Mật khẩu</label>
+      <input id="login-password" type="password" autocomplete="current-password" required>
+      <button type="submit" class="btn-primary">Đăng nhập</button>
+      <p class="error" id="login-error"></p>
+    </form>
+
+    <form id="form-register" class="tab-panel hidden">
+      <label>Tên đăng nhập</label>
+      <input id="reg-username" autocomplete="username" required>
+      <label>Mật khẩu (tối thiểu 6 ký tự)</label>
+      <input id="reg-password" type="password" autocomplete="new-password" required>
+      <button type="submit" class="btn-primary">Đăng ký</button>
+      <p class="hint">Sau khi đăng ký, quản trị viên (admin) cần cấp quyền trước khi bạn xem được nội dung.</p>
+      <p class="error" id="register-error"></p>
+    </form>
+  </div>
+</section>
+
+<!-- ===== PENDING (chưa được duyệt) ===== -->
+<section id="view-pending" class="view center-view hidden">
+  <div class="card">
+    <div class="brand"><div class="brand-dot dot-amber"></div><h1>Đang chờ duyệt</h1></div>
+    <p class="hint">Tài khoản <b id="pending-username"></b> đã đăng ký thành công nhưng chưa được admin cấp quyền
+      xem nội dung / chat. Vui lòng liên hệ quản trị viên.</p>
+    <button id="btn-pending-refresh" class="btn-secondary">Kiểm tra lại</button>
+    <button id="btn-pending-logout" class="btn-ghost">Đăng xuất</button>
+  </div>
+</section>
+
+<!-- ===== PASSPHRASE (khóa mã hóa đầu-cuối của phòng) ===== -->
+<section id="view-passphrase" class="view center-view hidden">
+  <div class="card">
+    <div class="brand"><div class="brand-dot"></div><h1>Mã hóa đầu-cuối</h1></div>
+    <p class="hint">Nhập mật khẩu mã hóa của phòng chat (do admin cung cấp riêng, ngoài hệ thống).
+      Server không lưu và không thể đọc được mật khẩu này.</p>
+    <input id="passphrase-input" type="password" placeholder="Mật khẩu mã hóa phòng chat">
+    <button id="btn-passphrase-continue" class="btn-primary">Tiếp tục</button>
+  </div>
+</section>
+
+<!-- ===== CHAT ===== -->
+<section id="view-chat" class="view hidden">
+  <header class="chat-header">
+    <div class="brand small">
+      <div class="brand-dot"></div>
+      <span>Chat nội bộ</span>
+      <span id="badge-unread" class="badge hidden">0</span>
+    </div>
+    <div class="header-actions">
+      <span id="chat-username" class="me-username"></span>
+      <button id="btn-admin" class="btn-icon hidden" title="Quản trị">⚙</button>
+      <button id="btn-logout" class="btn-icon" title="Đăng xuất">⏻</button>
+    </div>
+  </header>
+
+  <div id="messages" class="messages"></div>
+  <button id="btn-load-more" class="btn-loadmore hidden">Tải tin nhắn cũ hơn</button>
+
+  <div id="mention-dropdown" class="mention-dropdown hidden"></div>
+
+  <form id="form-send" class="composer">
+    <button type="button" id="btn-attach" class="btn-icon" title="Gửi ảnh/video">📎</button>
+    <input type="file" id="file-input" accept="image/*,video/*" class="hidden">
+    <input type="text" id="text-input" placeholder="Nhập tin nhắn... (dùng @ để tag)" autocomplete="off">
+    <button type="submit" class="btn-primary btn-send">Gửi</button>
+  </form>
+  <div id="upload-preview" class="upload-preview hidden">
+    <span id="upload-preview-name"></span>
+    <button type="button" id="btn-cancel-upload" class="btn-ghost small">Hủy</button>
+  </div>
+</section>
+
+<!-- ===== ADMIN PANEL ===== -->
+<section id="view-admin" class="view hidden">
+  <header class="chat-header">
+    <div class="brand small"><div class="brand-dot"></div><span>Quản trị người dùng</span></div>
+    <div class="header-actions">
+      <button id="btn-admin-close" class="btn-icon" title="Đóng">✕</button>
+    </div>
+  </header>
+  <div id="admin-list" class="admin-list"></div>
+</section>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
