@@ -1,0 +1,19 @@
+{
+  "name": "noibo-chat",
+  "version": "1.0.0",
+  "description": "Chat noi bo cong ty - Node.js + WebSocket + PostgreSQL (deploy tren Render.com)",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.17.1",
+    "pg": "^8.11.5",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2"
+  }
+}
