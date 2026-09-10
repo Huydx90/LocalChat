@@ -37,6 +37,7 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '14503246';
 const MESSAGE_RETENTION_DAYS = 2;
 const MESSAGE_PAGE_SIZE = 50;
 const MAX_PAYLOAD_MB = 20; // gioi han payload (anh/video da ma hoa + base64)
+const ALLOWED_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
 // ===== Ket noi PostgreSQL (chi doc tu DATABASE_URL, khong hard-code) =====
 const connectionString = process.env.DATABASE_URL;
@@ -79,6 +80,17 @@ async function initDatabase() {
         )
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages (created_at)`);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS message_reactions (
+            id SERIAL PRIMARY KEY,
+            message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            username TEXT NOT NULL,
+            emoji TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (message_id, username)
+        )
+    `);
 
     // Seed tai khoan admin duy nhat neu chua ton tai
     const existing = await pool.query('SELECT id FROM users WHERE username = $1', [ADMIN_USERNAME]);
@@ -275,22 +287,36 @@ app.get('/api/messages', authRequired, approvedRequired, async (req, res) => {
         let result;
         if (beforeId) {
             result = await pool.query(
-                `SELECT * FROM (
+                `WITH base AS (
                     SELECT id, sender, msg_type, ciphertext, iv, mime_type, mentions, created_at
                     FROM messages WHERE id < $1 ORDER BY id DESC LIMIT $2
-                 ) t ORDER BY id ASC`,
+                 )
+                 SELECT b.*, COALESCE(
+                    json_agg(json_build_object('emoji', r.emoji, 'username', r.username)) FILTER (WHERE r.id IS NOT NULL),
+                    '[]'
+                 ) AS reactions
+                 FROM base b LEFT JOIN message_reactions r ON r.message_id = b.id
+                 GROUP BY b.id, b.sender, b.msg_type, b.ciphertext, b.iv, b.mime_type, b.mentions, b.created_at
+                 ORDER BY b.id ASC`,
                 [beforeId, limit]
             );
         } else {
             result = await pool.query(
-                `SELECT * FROM (
+                `WITH base AS (
                     SELECT id, sender, msg_type, ciphertext, iv, mime_type, mentions, created_at
                     FROM messages ORDER BY id DESC LIMIT $1
-                 ) t ORDER BY id ASC`,
+                 )
+                 SELECT b.*, COALESCE(
+                    json_agg(json_build_object('emoji', r.emoji, 'username', r.username)) FILTER (WHERE r.id IS NOT NULL),
+                    '[]'
+                 ) AS reactions
+                 FROM base b LEFT JOIN message_reactions r ON r.message_id = b.id
+                 GROUP BY b.id, b.sender, b.msg_type, b.ciphertext, b.iv, b.mime_type, b.mentions, b.created_at
+                 ORDER BY b.id ASC`,
                 [limit]
             );
         }
-        res.json({ messages: result.rows, retentionDays: MESSAGE_RETENTION_DAYS });
+        res.json({ messages: result.rows, retentionDays: MESSAGE_RETENTION_DAYS, allowedReactions: ALLOWED_REACTIONS });
     } catch (err) {
         console.error('Loi doc messages:', err);
         res.status(500).json({ error: 'server_error' });
@@ -311,6 +337,7 @@ app.post('/api/messages', authRequired, approvedRequired, async (req, res) => {
             [req.user.username, msgType, ciphertext, iv, mimeType || null, mentionList]
         );
         const message = result.rows[0];
+        message.reactions = [];
         res.json({ success: true, message });
         broadcastToApproved({ type: 'new_message', message });
     } catch (err) {
@@ -318,6 +345,48 @@ app.post('/api/messages', authRequired, approvedRequired, async (req, res) => {
         if (err.message && /too large/i.test(err.message)) {
             return res.status(413).json({ error: 'payload_too_large' });
         }
+        res.status(500).json({ error: 'server_error' });
+    }
+});
+
+// Tha / doi / bo cam xuc len 1 tin nhan - moi user chi giu 1 cam xuc / 1 tin nhan
+// (click lai cung 1 emoji se go cam xuc). Day KHONG phai xoa/thu hoi tin nhan.
+app.post('/api/messages/:id/react', authRequired, approvedRequired, async (req, res) => {
+    const messageId = parseInt(req.params.id, 10);
+    const { emoji } = req.body || {};
+    if (!messageId || !ALLOWED_REACTIONS.includes(emoji)) {
+        return res.status(400).json({ error: 'invalid_input' });
+    }
+    try {
+        const msgExists = await pool.query('SELECT id FROM messages WHERE id = $1', [messageId]);
+        if (msgExists.rows.length === 0) return res.status(404).json({ error: 'not_found' });
+
+        const existing = await pool.query(
+            'SELECT emoji FROM message_reactions WHERE message_id = $1 AND username = $2',
+            [messageId, req.user.username]
+        );
+        if (existing.rows.length > 0 && existing.rows[0].emoji === emoji) {
+            // Bam lai cung emoji -> go cam xuc
+            await pool.query(
+                'DELETE FROM message_reactions WHERE message_id = $1 AND username = $2',
+                [messageId, req.user.username]
+            );
+        } else {
+            await pool.query(
+                `INSERT INTO message_reactions (message_id, username, emoji) VALUES ($1, $2, $3)
+                 ON CONFLICT (message_id, username) DO UPDATE SET emoji = EXCLUDED.emoji, created_at = now()`,
+                [messageId, req.user.username, emoji]
+            );
+        }
+        const reactionsRes = await pool.query(
+            'SELECT emoji, username FROM message_reactions WHERE message_id = $1 ORDER BY id ASC',
+            [messageId]
+        );
+        const reactions = reactionsRes.rows;
+        res.json({ success: true, reactions });
+        broadcastToApproved({ type: 'reaction_updated', messageId, reactions });
+    } catch (err) {
+        console.error('Loi cap nhat reaction:', err);
         res.status(500).json({ error: 'server_error' });
     }
 });
