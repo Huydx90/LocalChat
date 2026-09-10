@@ -20,6 +20,8 @@ const state = {
   selectedFile: null,
   unreadCount: 0,
   mentionQuery: null,     // vi tri dang go @xxx trong o nhap
+  renderedIds: new Set(), // chong render trung khi vua optimistic-render vua nhan lai qua WS
+  allowedReactions: ['👍', '❤️', '😂', '😮', '😢', '🙏'],
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -259,6 +261,8 @@ function connectWebSocket() {
     } else if (msg.type === 'user_registered') {
       if (!$('#view-admin').classList.contains('hidden')) loadAdminUsers();
       showToast(`Người dùng mới đăng ký: ${msg.username}`);
+    } else if (msg.type === 'reaction_updated') {
+      updateReactionsUI(msg.messageId, msg.reactions);
     }
   };
 
@@ -321,6 +325,9 @@ function renderMentions(escapedText, mentions) {
 async function loadMessages(initial) {
   try {
     const data = await api('/api/messages?limit=50');
+    if (Array.isArray(data.allowedReactions) && data.allowedReactions.length) {
+      state.allowedReactions = data.allowedReactions;
+    }
     $('#messages').innerHTML = '';
     for (const m of data.messages) await appendMessage(m, false);
     if (data.messages.length > 0) state.oldestId = data.messages[0].id;
@@ -338,7 +345,10 @@ $('#btn-load-more').addEventListener('click', async () => {
   const data = await api(`/api/messages?limit=50&beforeId=${state.oldestId}`);
   if (data.messages.length === 0) { $('#btn-load-more').classList.add('hidden'); return; }
   const frag = document.createDocumentFragment();
-  for (const m of data.messages) frag.appendChild(await buildBubble(m));
+  for (const m of data.messages) {
+    if (m.id) state.renderedIds.add(m.id);
+    frag.appendChild(await buildBubble(m));
+  }
   box.insertBefore(frag, box.firstChild);
   state.oldestId = data.messages[0].id;
   box.scrollTop = box.scrollHeight - prevHeight;
@@ -350,6 +360,8 @@ function scrollToBottom() {
 }
 
 async function appendMessage(m, autoscroll) {
+  if (m.id && state.renderedIds.has(m.id)) return; // da render roi (vd: vua optimistic-render luc gui)
+  if (m.id) state.renderedIds.add(m.id);
   const box = $('#messages');
   const wasAtBottom = isScrolledToBottom();
   box.appendChild(await buildBubble(m));
@@ -360,6 +372,7 @@ async function appendMessage(m, autoscroll) {
 async function buildBubble(m) {
   const mine = m.sender === state.user.username;
   const row = el('div', `bubble-row ${mine ? 'mine' : 'theirs'}`);
+  row.dataset.messageId = m.id;
   const meta = el('div', 'bubble-meta', `${mine ? 'Bạn' : m.sender} · ${formatTime(m.created_at)}`);
   const bubble = el('div', 'bubble');
 
@@ -387,6 +400,7 @@ async function buildBubble(m) {
     bubble.appendChild(el('span', 'bubble-media-fail', '🔒 Không giải mã được (kiểm tra mật khẩu phòng chat)'));
   }
 
+  const btnRow = el('div', 'bubble-btn-row');
   if (plainTextForCopy !== null) {
     const copyBtn = el('button', 'bubble-copy', '⧉');
     copyBtn.type = 'button';
@@ -394,12 +408,82 @@ async function buildBubble(m) {
     copyBtn.addEventListener('click', () => {
       navigator.clipboard.writeText(plainTextForCopy).then(() => showToast('Đã copy'));
     });
-    bubble.appendChild(copyBtn);
+    btnRow.appendChild(copyBtn);
   }
+  const reactBtn = el('button', 'bubble-react-trigger', '😊');
+  reactBtn.type = 'button';
+  reactBtn.title = 'Thả cảm xúc';
+  reactBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleReactionPicker(row, m.id); });
+  btnRow.appendChild(reactBtn);
+  bubble.appendChild(btnRow);
 
   row.appendChild(meta);
   row.appendChild(bubble);
+  row.appendChild(buildReactionsBar(m.reactions || []));
   return row;
+}
+
+/* -------------------------------- Reactions ------------------------------- */
+function buildReactionsBar(reactions) {
+  const bar = el('div', 'reactions-bar');
+  renderReactionsInto(bar, reactions);
+  return bar;
+}
+
+function renderReactionsInto(bar, reactions) {
+  bar.innerHTML = '';
+  const counts = {}; // emoji -> { count, mine }
+  reactions.forEach(r => {
+    if (!counts[r.emoji]) counts[r.emoji] = { count: 0, mine: false };
+    counts[r.emoji].count++;
+    if (r.username === state.user.username) counts[r.emoji].mine = true;
+  });
+  Object.entries(counts).forEach(([emoji, info]) => {
+    const pill = el('button', `reaction-pill${info.mine ? ' mine' : ''}`, `${emoji} ${info.count}`);
+    pill.type = 'button';
+    pill.addEventListener('click', () => {
+      const row = bar.closest('.bubble-row');
+      sendReaction(row.dataset.messageId, emoji);
+    });
+    bar.appendChild(pill);
+  });
+}
+
+function updateReactionsUI(messageId, reactions) {
+  const row = document.querySelector(`.bubble-row[data-message-id="${messageId}"]`);
+  if (!row) return;
+  const bar = row.querySelector('.reactions-bar');
+  if (bar) renderReactionsInto(bar, reactions);
+}
+
+let activePickerRow = null;
+function toggleReactionPicker(row, messageId) {
+  closeReactionPicker();
+  if (activePickerRow === row) { activePickerRow = null; return; }
+  const picker = el('div', 'reaction-picker');
+  state.allowedReactions.forEach(emoji => {
+    const opt = el('button', 'reaction-picker-opt', emoji);
+    opt.type = 'button';
+    opt.addEventListener('click', () => { sendReaction(messageId, emoji); closeReactionPicker(); });
+    picker.appendChild(opt);
+  });
+  row.querySelector('.bubble').appendChild(picker);
+  activePickerRow = row;
+  setTimeout(() => document.addEventListener('click', closeReactionPickerOnce), 0);
+}
+function closeReactionPickerOnce() { closeReactionPicker(); }
+function closeReactionPicker() {
+  document.removeEventListener('click', closeReactionPickerOnce);
+  document.querySelectorAll('.reaction-picker').forEach(p => p.remove());
+  activePickerRow = null;
+}
+async function sendReaction(messageId, emoji) {
+  try {
+    const data = await api(`/api/messages/${messageId}/react`, { method: 'POST', body: { emoji } });
+    updateReactionsUI(messageId, data.reactions);
+  } catch (err) {
+    showToast('Không thả được cảm xúc.');
+  }
 }
 
 /* ------------------------------- Composer --------------------------------- */
@@ -431,7 +515,10 @@ $('#form-send').addEventListener('submit', async (e) => {
       const buf = await f.arrayBuffer();
       const { iv, ciphertext } = await encryptBytes(state.roomKey, buf);
       const msgType = f.type.startsWith('video/') ? 'video' : 'image';
-      await api('/api/messages', { method: 'POST', body: { msgType, ciphertext, iv, mimeType: f.type, mentions: [] } });
+      const res = await api('/api/messages', { method: 'POST', body: { msgType, ciphertext, iv, mimeType: f.type, mentions: [] } });
+      // Ve ngay tin nhan vua gui, khong cho WebSocket "vong" lai moi hien -
+      // neu socket cua minh dang reconnect thi minh se khong bi mat tin cua chinh minh.
+      if (res && res.message) await appendMessage(res.message, true);
       state.selectedFile = null; fileInput.value = '';
       $('#upload-preview').classList.add('hidden');
     } else {
@@ -439,7 +526,8 @@ $('#form-send').addEventListener('submit', async (e) => {
       if (!text) return;
       const mentions = extractMentions(text);
       const { iv, ciphertext } = await encryptText(state.roomKey, text);
-      await api('/api/messages', { method: 'POST', body: { msgType: 'text', ciphertext, iv, mentions } });
+      const res = await api('/api/messages', { method: 'POST', body: { msgType: 'text', ciphertext, iv, mentions } });
+      if (res && res.message) await appendMessage(res.message, true);
       textInput.value = '';
     }
     hideMentionDropdown();

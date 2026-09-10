@@ -114,14 +114,38 @@ input:focus{ outline:none; border-color: var(--teal); }
 .theirs .bubble{ background: var(--bg-panel); }
 .bubble .mention{ color: var(--cyan); font-weight:600; }
 .bubble img, .bubble video{ max-width:260px; max-height:320px; border-radius:10px; display:block; margin-top:2px; }
-.bubble-copy{
-  position:absolute; top:-10px; right:-10px; width:26px; height:26px; border-radius:50%;
-  background: var(--bg-elev); border:1px solid var(--border); color: var(--teal); font-size:.75rem;
-  cursor:pointer; opacity:0; transition:opacity .15s; display:flex; align-items:center; justify-content:center;
+.bubble-btn-row{
+  position:absolute; top:-13px; right:-6px; display:flex; gap:4px;
+  opacity:0; transition:opacity .15s;
 }
-.bubble-row:hover .bubble-copy, .bubble-row:active .bubble-copy{ opacity:1; }
+.bubble-row:hover .bubble-btn-row, .bubble-row:active .bubble-btn-row{ opacity:1; }
+.bubble-copy, .bubble-react-trigger{
+  width:26px; height:26px; border-radius:50%;
+  background: var(--bg-elev); border:1px solid var(--border); color: var(--teal); font-size:.75rem;
+  cursor:pointer; display:flex; align-items:center; justify-content:center;
+}
+.bubble-react-trigger{ font-size:.85rem; }
 .bubble-pending{ opacity:.55; }
 .bubble-media-fail{ font-size:.8rem; color:var(--danger); }
+
+/* ---------- reactions ---------- */
+.reactions-bar{ display:flex; flex-wrap:wrap; gap:5px; margin-top:3px; padding:0 4px; }
+.reactions-bar:empty{ margin:0; }
+.reaction-pill{
+  font-family:var(--mono); font-size:.72rem; padding:2px 8px; border-radius:20px; cursor:pointer;
+  background: var(--bg-elev); border:1px solid var(--border); color: var(--text-dim);
+}
+.reaction-pill.mine{ border-color: var(--teal); color: var(--teal); background: rgba(20,224,196,0.1); }
+.reaction-picker{
+  position:absolute; bottom:100%; right:0; margin-bottom:6px; display:flex; gap:4px;
+  background: var(--bg-elev); border:1px solid var(--border); border-radius:20px; padding:5px 7px;
+  box-shadow:0 10px 24px rgba(0,0,0,.4); z-index:8;
+}
+.reaction-picker-opt{
+  background:transparent; border:none; font-size:1.15rem; cursor:pointer; padding:2px;
+  transition: transform .1s;
+}
+.reaction-picker-opt:hover{ transform: scale(1.25); }
 
 /* ---------- composer ---------- */
 .composer{
