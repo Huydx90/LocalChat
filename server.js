@@ -25,6 +25,10 @@ const { Pool } = require('pg');
 // binh thuong. Chi dung lam FALLBACK phia server khi client khong tu convert
 // duoc (xem prepareImageForUpload() ben client va route /api/messages/media).
 const heicConvert = require('heic-convert');
+// STEP 2.1: logic phan loai trang thai luu tru duoc tach ra file rieng (THUAN
+// TUY, khong Postgres) de co the unit-test toan bo ma tran Case A-J ma khong
+// can DB that (xem storage-policy.js va test/storage-policy.test.js).
+const { validateThresholds, classifyUsage, formatDiagnostic, parseEnvNumber } = require('./storage-policy');
 
 const app = express();
 app.set('trust proxy', true); // chay sau reverse proxy cua Render.com
@@ -52,40 +56,95 @@ if (!JWT_SECRET) {
 const EFFECTIVE_JWT_SECRET = JWT_SECRET || 'dev-only-insecure-secret-change-me';
 
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'do.huy';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '14503246';
+// STEP 2.1 (§25/§26 audit finding): .env.example truoc day chua mot mat khau
+// THAT ('14503246') lam fallback mac dinh - neu ai quen dat ADMIN_PASSWORD tren
+// Render, server se tao tai khoan admin voi mat khau nay, va gia tri nay lo
+// ngay trong .env.example (git). Ap dung DUNG pattern fail-fast da co san cho
+// JWT_SECRET/MESSAGE_ENCRYPTION_KEY: khong con fallback mat khau cong khai cho
+// production.
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+if (!ADMIN_PASSWORD) {
+    if (process.env.NODE_ENV === 'production') {
+        console.error('❌ Thieu ADMIN_PASSWORD trong moi truong production. Server tu choi khoi dong vi ly do ' +
+            'bao mat (khong con fallback mat khau cong khai trong code/.env.example cho production).');
+        process.exit(1);
+    }
+    console.warn('⚠️  Thieu ADMIN_PASSWORD - dang dung mat khau tam CHI DUNG CHO DEV ("dev-only-change-me"). ' +
+        'Hay dat ADMIN_PASSWORD tren Render (tab Environment) truoc khi dua vao san xuat.');
+}
+const EFFECTIVE_ADMIN_PASSWORD = ADMIN_PASSWORD || 'dev-only-change-me';
 
 // ===== Retention / storage config (STEP: rolling retention) =====
-const MESSAGE_RETENTION_HOURS = parseInt(process.env.MESSAGE_RETENTION_HOURS, 10) || 48;
-const DB_STORAGE_LIMIT_MB = process.env.DB_STORAGE_LIMIT_MB ? parseInt(process.env.DB_STORAGE_LIMIT_MB, 10) : null;
-const DB_WARNING_RATIO = parseFloat(process.env.DB_WARNING_RATIO) || 0.80;
-const DB_EMERGENCY_RATIO = parseFloat(process.env.DB_EMERGENCY_RATIO) || 0.90;
-const DB_TARGET_RATIO = parseFloat(process.env.DB_TARGET_RATIO) || 0.75;
-// STEP 2A: hard guard - DELETE khong lam pg_database_size() giam ngay lap tuc (dead
-// tuples, chi VACUUM FULL/pg_repack moi rewrite that su - va khong duoc chay trong
-// request/cleanup loop vi khoa bang). Vi vay emergency cleanup co the "thanh cong"
-// (xoa rat nhieu tin) ma ratio van khong giam ro ret. Can 1 lop phong thu rieng:
-// tu choi nhan file/tin nhan moi khi DB van con qua cao SAU KHI da thu cleanup.
-const DB_HARD_BLOCK_MEDIA_RATIO = parseFloat(process.env.DB_HARD_BLOCK_MEDIA_RATIO) || 0.95;
-const DB_HARD_BLOCK_TEXT_RATIO = parseFloat(process.env.DB_HARD_BLOCK_TEXT_RATIO) || 0.99;
-const EMERGENCY_DELETE_BATCH_SIZE = parseInt(process.env.EMERGENCY_DELETE_BATCH_SIZE, 10) || 500;
+// STEP 2.2 (audit finding): pattern cu `parseInt(process.env.X, 10) || default`
+// / `parseFloat(process.env.X) || default` AM THAM nuot moi gia tri falsy
+// (0, hoac NaN do go sai ten bien vd "abc") thanh default, khong ai biet cho
+// toi khi DB day that/gioi han sai ma tuong da cau hinh dung. Tu gio dung
+// parseEnvNumber() (storage-policy.js) phan biet ro: chua cau hinh (dung
+// default) vs. co cau hinh nhung SAI (throw -> fail-fast ngay khi khoi dong,
+// giong het pattern JWT_SECRET/ADMIN_PASSWORD da co san o tren).
+let MESSAGE_RETENTION_HOURS, DB_STORAGE_LIMIT_MB, DB_WARNING_RATIO, DB_EMERGENCY_RATIO,
+    DB_TARGET_RATIO, DB_HARD_BLOCK_MEDIA_RATIO, DB_HARD_BLOCK_TEXT_RATIO,
+    EMERGENCY_DELETE_BATCH_SIZE, MAX_CLEANUP_ITERATIONS_PER_CYCLE,
+    MAX_IMAGE_BYTES, MAX_VIDEO_BYTES;
+
+try {
+    MESSAGE_RETENTION_HOURS = parseEnvNumber('MESSAGE_RETENTION_HOURS', process.env.MESSAGE_RETENTION_HOURS, 48, { integer: true, min: 1 });
+    // DB_STORAGE_LIMIT_MB: unset/blank -> null (tinh nang tat, hop le). Nhung
+    // neu DA cau hinh thi phai la so nguyen duong - "abc" hay "0" deu la LOI
+    // cau hinh (truoc day bi am tham hieu la "chua cau hinh").
+    DB_STORAGE_LIMIT_MB = parseEnvNumber('DB_STORAGE_LIMIT_MB', process.env.DB_STORAGE_LIMIT_MB, null, { integer: true, min: 1 });
+    DB_WARNING_RATIO = parseEnvNumber('DB_WARNING_RATIO', process.env.DB_WARNING_RATIO, 0.80);
+    DB_EMERGENCY_RATIO = parseEnvNumber('DB_EMERGENCY_RATIO', process.env.DB_EMERGENCY_RATIO, 0.90);
+    DB_TARGET_RATIO = parseEnvNumber('DB_TARGET_RATIO', process.env.DB_TARGET_RATIO, 0.75);
+    // STEP 2A: hard guard - DELETE khong lam pg_database_size() giam ngay lap tuc (dead
+    // tuples, chi VACUUM FULL/pg_repack moi rewrite that su - va khong duoc chay trong
+    // request/cleanup loop vi khoa bang). Vi vay emergency cleanup co the "thanh cong"
+    // (xoa rat nhieu tin) ma ratio van khong giam ro ret. Can 1 lop phong thu rieng:
+    // tu choi nhan file/tin nhan moi khi DB van con qua cao SAU KHI da thu cleanup.
+    DB_HARD_BLOCK_MEDIA_RATIO = parseEnvNumber('DB_HARD_BLOCK_MEDIA_RATIO', process.env.DB_HARD_BLOCK_MEDIA_RATIO, 0.95);
+    DB_HARD_BLOCK_TEXT_RATIO = parseEnvNumber('DB_HARD_BLOCK_TEXT_RATIO', process.env.DB_HARD_BLOCK_TEXT_RATIO, 0.99);
+    EMERGENCY_DELETE_BATCH_SIZE = parseEnvNumber('EMERGENCY_DELETE_BATCH_SIZE', process.env.EMERGENCY_DELETE_BATCH_SIZE, 500, { integer: true, min: 1 });
+    // STEP 2.1 §14: chan vong lap batch delete chay vo han, co the cau hinh qua MAX_CLEANUP_ITERATIONS
+    MAX_CLEANUP_ITERATIONS_PER_CYCLE = parseEnvNumber('MAX_CLEANUP_ITERATIONS', process.env.MAX_CLEANUP_ITERATIONS, 50, { integer: true, min: 1 });
+    // ===== Media limits (STEP: image/video limits) =====
+    MAX_IMAGE_BYTES = parseEnvNumber('MAX_IMAGE_BYTES', process.env.MAX_IMAGE_BYTES, 512000, { integer: true, min: 1 });       // 500 KB
+    MAX_VIDEO_BYTES = parseEnvNumber('MAX_VIDEO_BYTES', process.env.MAX_VIDEO_BYTES, 10485760, { integer: true, min: 1 });     // 10 MB
+} catch (err) {
+    console.error('❌ Cau hinh bien moi truong dang so khong hop le: ' + err.message);
+    console.error('Server tu choi khoi dong. Sua bien moi truong roi khoi dong lai (blank/unset la hop le va se ' +
+        'dung gia tri mac dinh, nhung neu DA dat gia tri thi phai la so hop le trong rang buoc cho phep).');
+    process.exit(1);
+}
+
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000; // 10 phut - nam trong khoang 5-15 phut yeu cau
-const MAX_CLEANUP_ITERATIONS_PER_CYCLE = 50; // chan vong lap batch delete chay vo han
+
+const STORAGE_THRESHOLDS = {
+    target: DB_TARGET_RATIO,
+    warning: DB_WARNING_RATIO,
+    emergency: DB_EMERGENCY_RATIO,
+    hardBlockMedia: DB_HARD_BLOCK_MEDIA_RATIO,
+    hardBlockText: DB_HARD_BLOCK_TEXT_RATIO,
+};
 
 if (!DB_STORAGE_LIMIT_MB) {
     console.warn('⚠️  Chua cau hinh DB_STORAGE_LIMIT_MB - tinh nang rolling/emergency cleanup VA hard-block khi ' +
         'DB gan day se KHONG hoat dong, chi con normal retention 48h. Dat bien nay bang dung luong (MB) THUC TE ' +
         'cua goi Postgres ban dang dung tren Render (kiem tra trong Render dashboard, KHONG doan/mac dinh 1024) ' +
         'de bat tinh nang nay.');
-} else if (!(DB_WARNING_RATIO < DB_EMERGENCY_RATIO && DB_EMERGENCY_RATIO < DB_HARD_BLOCK_MEDIA_RATIO &&
-    DB_HARD_BLOCK_MEDIA_RATIO <= DB_HARD_BLOCK_TEXT_RATIO && DB_TARGET_RATIO < DB_EMERGENCY_RATIO)) {
-    console.warn('⚠️  Cac nguong DB_WARNING_RATIO/DB_EMERGENCY_RATIO/DB_TARGET_RATIO/DB_HARD_BLOCK_*_RATIO dang ' +
-        'khong theo dung thu tu hop ly (warning < emergency < hard-block-media <= hard-block-text, target < ' +
-        'emergency). Kiem tra lai cau hinh, hanh vi cleanup/hard-block co the khong nhu mong doi.');
+} else {
+    // STEP 2.1 §22: FAIL-FAST that su (khong chi warn) neu nguong sai quan he
+    // logic - nguong sai co the vo hieu hoa hard-block/emergency cleanup ma
+    // khong ai biet cho toi khi DB day that.
+    const check = validateThresholds(STORAGE_THRESHOLDS);
+    if (!check.valid) {
+        console.error('❌ Cau hinh nguong luu tru (DB_WARNING_RATIO/DB_EMERGENCY_RATIO/DB_TARGET_RATIO/' +
+            'DB_HARD_BLOCK_MEDIA_RATIO/DB_HARD_BLOCK_TEXT_RATIO) khong hop le:');
+        check.errors.forEach(e => console.error('   - ' + e));
+        console.error('Server tu choi khoi dong. Sua bien moi truong roi khoi dong lai.');
+        process.exit(1);
+    }
 }
 
-// ===== Media limits (STEP: image/video limits) =====
-const MAX_IMAGE_BYTES = parseInt(process.env.MAX_IMAGE_BYTES, 10) || 512000;       // 500 KB
-const MAX_VIDEO_BYTES = parseInt(process.env.MAX_VIDEO_BYTES, 10) || 10485760;     // 10 MB
 const MAX_TEXT_CHARS = 4000;
 const ALLOWED_IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 const ALLOWED_VIDEO_MIMES = ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska'];
@@ -194,7 +253,7 @@ async function runMigrations() {
 async function seedAdmin() {
     const existing = await pool.query('SELECT id FROM users WHERE username = $1', [ADMIN_USERNAME]);
     if (existing.rows.length === 0) {
-        const hash = await bcrypt.hash(ADMIN_PASSWORD, 10);
+        const hash = await bcrypt.hash(EFFECTIVE_ADMIN_PASSWORD, 10);
         await pool.query(
             `INSERT INTO users (username, password_hash, role, status) VALUES ($1, $2, 'admin', 'approved')`,
             [ADMIN_USERNAME, hash]
@@ -206,16 +265,21 @@ async function seedAdmin() {
 // ===================================================================
 // Retention: normal (48h) + rolling/emergency cleanup theo dung luong DB
 // ===================================================================
+// STEP 2.1 §4/§18: THU TU XOA PHAI TAT DINH - ORDER BY created_at ASC, id ASC
+// (khong chi created_at ASC). Nhieu message co the co CUNG created_at (vi du
+// gui lien tiep trong cung 1ms, hoac do do phan giai timestamp), luc do can
+// tieu chi phu id ASC de ket qua luon nhat quan giua cac lan chay, khong phu
+// thuoc vao thu tu vat ly khong xac dinh cua Postgres khi ORDER BY co ties.
 async function deleteOldestBatch(limit, onlyOlderThan) {
     let query, params;
     if (onlyOlderThan) {
         query = `DELETE FROM messages WHERE id IN (
-                    SELECT id FROM messages WHERE created_at < $1 ORDER BY created_at ASC LIMIT $2
+                    SELECT id FROM messages WHERE created_at < $1 ORDER BY created_at ASC, id ASC LIMIT $2
                  ) RETURNING id`;
         params = [onlyOlderThan, limit];
     } else {
         query = `DELETE FROM messages WHERE id IN (
-                    SELECT id FROM messages ORDER BY created_at ASC LIMIT $1
+                    SELECT id FROM messages ORDER BY created_at ASC, id ASC LIMIT $1
                  ) RETURNING id`;
         params = [limit];
     }
@@ -223,26 +287,47 @@ async function deleteOldestBatch(limit, onlyOlderThan) {
     return res.rowCount;
 }
 
+// STEP 2.1 §9/§14: do dung luong that. TRA VE 1 OBJECT CO CO CAU RO RANG thay
+// vi null/throw lan lon, de moi noi goi ham nay xu ly tuong minh 3 truong hop
+// khac nhau (quota tat / do thanh cong / do THAT BAI) thay vi nham lan
+// "khong co quota" voi "loi tam thoi khi query".
+//   { disabled: true }                       -> chua cau hinh DB_STORAGE_LIMIT_MB, tinh nang tat
+//   { disabled:false, error:true }           -> pg_database_size() that bai (vd mat ket noi tam thoi)
+//   { disabled:false, error:false, ratio, usedMB } -> do thanh cong
 async function getDbUsage() {
-    if (!DB_STORAGE_LIMIT_MB) return null; // tinh nang tat neu chua cau hinh quota
-    const res = await pool.query('SELECT pg_database_size(current_database()) AS bytes');
-    const usedMB = Number(res.rows[0].bytes) / (1024 * 1024);
-    return { ratio: usedMB / DB_STORAGE_LIMIT_MB, usedMB };
+    if (!DB_STORAGE_LIMIT_MB) return { disabled: true, error: false };
+    try {
+        const res = await pool.query('SELECT pg_database_size(current_database()) AS bytes');
+        const usedMB = Number(res.rows[0].bytes) / (1024 * 1024);
+        return { disabled: false, error: false, ratio: usedMB / DB_STORAGE_LIMIT_MB, usedMB };
+    } catch (err) {
+        // Khong log err chi tiet ra ngoai (co the chua thong tin ket noi) - chi
+        // log message ngan, khong log DATABASE_URL/secrets (STEP 2.1 §25).
+        console.error('[STORAGE] Khong the do dung luong PostgreSQL (pg_database_size that bai), coi nhu ' +
+            'KHONG XAC MINH DUOC trang thai luu tru luc nay:', err.message);
+        return { disabled: false, error: true };
+    }
 }
 
-// STEP 2A: dung mot bien module-level de cac route (upload media/text) co the
-// doc "trang thai storage gan nhat" ma khong phai query pg_database_size() moi
-// request (query nay khong cuc nhanh va khong can chinh xac tuyet doi tung giay).
-// Duoc refresh moi chu ky cleanup (10 phut) VA truoc khi tra loi 1 request neu
-// cache qua cu (xem checkStorageGuard).
+// STEP 2.1 §7/§15: cache toi da 30s DE TRANH goi pg_database_size() qua nhieu
+// (moi request upload/text deu goi checkStorageGuard) - nhung cache nay CHI AN
+// TOAN khi con CACH XA nguong hard-block. Neu so lieu cache gan nhat da nam
+// trong pham vi "an toan margin" duoi DB_HARD_BLOCK_MEDIA_RATIO, BAT BUOC do
+// lai THAT thay vi tin cache, vi trong toi da 30s do nhieu upload dong thoi co
+// the cung "nhin thay" 1 con so cu va cung vuot nguong ma khong ai bi chan.
+// Xa nguong (truong hop pho bien) thi van dung cache de khong lam qua tai DB
+// bang hang tram query gan nhu trung lap moi giay.
 let lastKnownUsage = null;
 let lastKnownUsageAt = 0;
-const USAGE_CACHE_MS = 30 * 1000; // cache toi da 30s truoc khi query lai
+const USAGE_CACHE_MS = 30 * 1000;
+const STORAGE_GUARD_FRESH_MARGIN = 0.03; // trong vong 3 diem % duoi hard-block-media -> luon do lai
 
-async function getDbUsageCached() {
-    if (!DB_STORAGE_LIMIT_MB) return null;
+async function getDbUsageForGuard() {
     const now = Date.now();
-    if (lastKnownUsage && (now - lastKnownUsageAt) < USAGE_CACHE_MS) return lastKnownUsage;
+    const cacheUsable = lastKnownUsage && !lastKnownUsage.disabled && !lastKnownUsage.error &&
+        (now - lastKnownUsageAt) < USAGE_CACHE_MS;
+    const cacheNearHardBlock = cacheUsable && lastKnownUsage.ratio >= (DB_HARD_BLOCK_MEDIA_RATIO - STORAGE_GUARD_FRESH_MARGIN);
+    if (cacheUsable && !cacheNearHardBlock) return lastKnownUsage;
     const usage = await getDbUsage();
     lastKnownUsage = usage;
     lastKnownUsageAt = now;
@@ -255,10 +340,26 @@ async function getDbUsageCached() {
 // DB_HARD_BLOCK_*_RATIO ben tren). Neu cleanup khong kip giai phong dung luong,
 // hard-block van bao ve DB khoi bi day den 100% roi chet giua chung INSERT.
 async function checkStorageGuard(kind) {
-    const usage = await getDbUsageCached();
-    if (!usage) return { blocked: false }; // tinh nang tat neu chua cau hinh DB_STORAGE_LIMIT_MB
-    const threshold = kind === 'media' ? DB_HARD_BLOCK_MEDIA_RATIO : DB_HARD_BLOCK_TEXT_RATIO;
-    if (usage.ratio >= threshold) {
+    const usage = await getDbUsageForGuard();
+    if (usage.disabled) return { blocked: false }; // tinh nang tat neu chua cau hinh DB_STORAGE_LIMIT_MB
+    if (usage.error) {
+        // STEP 2.1 §9: khong xac minh duoc dung luong - fail-safe co CHU DICH,
+        // khac nhau giua media va text vi rui ro khac nhau:
+        //  - Media (anh/video toi 10MB): FAIL-CLOSED. Chap nhan mu quang 1 video
+        //    10MB trong luc khong biet DB con trong hay khong la rui ro qua lon.
+        //  - Text (vai KB): FAIL-OPEN. Mot lan do dung luong that bai tam thoi
+        //    khong nen lam gian doan toan bo chat - loi da duoc log o getDbUsage().
+        if (kind === 'media') {
+            return {
+                blocked: true,
+                message: 'Hệ thống tạm thời không thể xác minh dung lượng lưu trữ. Vui lòng thử gửi lại sau ít phút.'
+            };
+        }
+        return { blocked: false };
+    }
+    const state = classifyUsage(usage.ratio, STORAGE_THRESHOLDS);
+    const blocked = kind === 'media' ? state.mediaBlocked : state.textBlocked;
+    if (blocked) {
         return {
             blocked: true,
             ratio: usage.ratio,
@@ -279,6 +380,10 @@ async function normalRetentionCleanup() {
         iterations++;
     } while (deleted > 0 && iterations < MAX_CLEANUP_ITERATIONS_PER_CYCLE);
     if (total > 0) console.log(`[RETENTION] Deleted ${total} messages older than ${MESSAGE_RETENTION_HOURS}h`);
+    if (iterations >= MAX_CLEANUP_ITERATIONS_PER_CYCLE && deleted > 0) {
+        console.warn(`[RETENTION] Dừng ở MAX_CLEANUP_ITERATIONS_PER_CYCLE (${MAX_CLEANUP_ITERATIONS_PER_CYCLE}) - ` +
+            'vẫn còn tin nhắn quá hạn retention, sẽ tiếp tục xóa ở chu kỳ tiếp theo.');
+    }
 }
 
 // STEP 2A - VIET LAI: KHONG con gia dinh "DELETE -> pg_database_size() giam ngay".
@@ -292,50 +397,67 @@ async function normalRetentionCleanup() {
 //
 // Vi vay vong lap duoi day:
 //   - Log trung thuc ratio THUC TE do duoc sau moi batch (khong suy doan).
-//   - Dieu kien dung la: da xoa het tin nhan co the xoa (deleted===0), HOAC
-//     dat MAX_CLEANUP_ITERATIONS_PER_CYCLE, HOAC ratio (do that) < target.
+//   - Dieu kien dung la (STEP 2.1 §14, moi truong hop deu log ro ly do dung):
+//     1. da ve duoi target ratio, 2. het tin nhan de xoa, 3. do dung luong
+//     that bai giua chung, 4. dat MAX_CLEANUP_ITERATIONS_PER_CYCLE.
 //   - Neu vong lap ket thuc ma ratio VAN >= DB_EMERGENCY_RATIO, log WARNING ro
 //     rang thay vi "finished" mac dinh - de admin biet cleanup khong du hieu
 //     qua ngay lap tuc va hard-block (checkStorageGuard) dang la tuyen phong
 //     thu chinh luc nay.
-async function emergencyStorageCleanup() {
-    let usage = await getDbUsage(); // luon query moi (khong dung cache) de co so lieu chinh xac nhat luc quyet dinh
-    if (!usage || usage.ratio < DB_EMERGENCY_RATIO) {
-        if (usage) { lastKnownUsage = usage; lastKnownUsageAt = Date.now(); }
+// STEP 2.1: nhan "prefetchedUsage" tuy chon de tranh 1 lan query pg_database_size()
+// thua khi ham goi (checkStorageAndMaybeCleanup) da vua do xong.
+async function emergencyStorageCleanup(prefetchedUsage) {
+    let usage = prefetchedUsage || await getDbUsage();
+    if (usage.disabled) return;
+    if (usage.error) {
+        console.error('[STORAGE] Bỏ qua emergency cleanup chu kỳ này vì không đo được dung lượng (sẽ thử lại ở chu kỳ sau).');
+        return;
+    }
+    if (usage.ratio < DB_EMERGENCY_RATIO) {
+        lastKnownUsage = usage; lastKnownUsageAt = Date.now();
         return;
     }
 
-    console.log(`[STORAGE] Database usage: ${(usage.ratio * 100).toFixed(1)}% (${usage.usedMB.toFixed(1)}MB / ${DB_STORAGE_LIMIT_MB}MB)`);
+    console.log(formatDiagnostic('[STORAGE]', usage.usedMB, DB_STORAGE_LIMIT_MB, usage.ratio));
     console.log('[STORAGE] Emergency cleanup started');
     let iterations = 0;
     let totalDeleted = 0;
-    let reachedTarget = false;
+    let stopReason = null;
 
     while (iterations < MAX_CLEANUP_ITERATIONS_PER_CYCLE) {
         const deleted = await deleteOldestBatch(EMERGENCY_DELETE_BATCH_SIZE, null); // xoa tin cu nhat truoc, bat ke tuoi
         totalDeleted += deleted;
         iterations++;
         if (deleted === 0) {
+            stopReason = 'no_more_rows';
             console.log('[STORAGE] Không còn message nào để xóa thêm.');
-            break; // khong con gi de xoa, dung du ratio co the van cao (xem canh bao ben duoi)
+            break;
         }
         usage = await getDbUsage(); // do lai THAT SU, khong gia dinh no giam
+        if (usage.error) {
+            stopReason = 'measurement_failed';
+            console.error(`[STORAGE] Dừng emergency cleanup giữa chừng (đã xóa ${totalDeleted}) vì không đo lại được dung lượng.`);
+            break;
+        }
         console.log(`[STORAGE] Deleted ${deleted} oldest messages (tổng: ${totalDeleted}) - Database usage: ${(usage.ratio * 100).toFixed(1)}%`);
-        if (usage.ratio < DB_TARGET_RATIO) { reachedTarget = true; break; }
+        if (usage.ratio < DB_TARGET_RATIO) { stopReason = 'target_reached'; break; }
+    }
+    if (!stopReason) {
+        stopReason = 'max_iterations';
+        console.warn(`[STORAGE] Dừng emergency cleanup vì đạt MAX_CLEANUP_ITERATIONS_PER_CYCLE (${MAX_CLEANUP_ITERATIONS_PER_CYCLE}), sẽ tiếp tục ở chu kỳ sau.`);
     }
 
-    lastKnownUsage = usage;
-    lastKnownUsageAt = Date.now();
+    if (!usage.error) { lastKnownUsage = usage; lastKnownUsageAt = Date.now(); }
 
-    if (reachedTarget) {
+    if (stopReason === 'target_reached') {
         console.log('[STORAGE] Emergency cleanup finished - đã về dưới target ratio.');
-    } else if (usage.ratio >= DB_EMERGENCY_RATIO) {
-        console.warn(`[STORAGE] ⚠️ Emergency cleanup kết thúc nhưng usage vẫn ở mức ${(usage.ratio * 100).toFixed(1)}% ` +
-            '(>= emergency threshold). DELETE không đảm bảo giảm pg_database_size() ngay lập tức do dead tuples - ' +
-            'đây là giới hạn cố hữu của PostgreSQL, không phải cleanup thất bại. Hard-block guard ' +
-            `(DB_HARD_BLOCK_MEDIA_RATIO=${DB_HARD_BLOCK_MEDIA_RATIO}) sẽ chặn upload media mới nếu ratio vượt ngưỡng đó.`);
-    } else {
-        console.log(`[STORAGE] Emergency cleanup finished - usage hiện tại ${(usage.ratio * 100).toFixed(1)}% (dưới emergency threshold).`);
+    } else if (!usage.error && usage.ratio >= DB_EMERGENCY_RATIO) {
+        console.warn(`[STORAGE] ⚠️ Emergency cleanup kết thúc (lý do: ${stopReason}) nhưng usage vẫn ở mức ` +
+            `${(usage.ratio * 100).toFixed(1)}% (>= emergency threshold). DELETE không đảm bảo giảm pg_database_size() ` +
+            'ngay lập tức do dead tuples - đây là giới hạn cố hữu của PostgreSQL, không phải cleanup thất bại. ' +
+            `Hard-block guard (DB_HARD_BLOCK_MEDIA_RATIO=${DB_HARD_BLOCK_MEDIA_RATIO}) sẽ chặn upload media mới nếu ratio vượt ngưỡng đó.`);
+    } else if (!usage.error) {
+        console.log(`[STORAGE] Emergency cleanup finished (lý do: ${stopReason}) - usage hiện tại ${(usage.ratio * 100).toFixed(1)}% (dưới emergency threshold).`);
     }
 
     // Best-effort: khuyen khich Postgres tai su dung / cat bot vung trong o cuoi
@@ -349,6 +471,39 @@ async function emergencyStorageCleanup() {
     }
 }
 
+// STEP 2.1 §3: canh bao thuc su khi usage vao vung [WARNING, EMERGENCY) - truoc
+// day DB_WARNING_RATIO CHI duoc dinh nghia/validate nhung KHONG bao gio thuc su
+// log canh bao. Chay 1 lan moi chu ky cleanup (10 phut/lan, KHONG phai moi
+// request) va CHI log khi MOI VAO vung canh bao (rate-limit tu nhien qua
+// "warnedAboveThreshold") de tranh spam log lien tuc trong khi van o nguyen
+// trang thai canh bao trong nhieu gio.
+let warnedAboveThreshold = false;
+async function checkStorageAndMaybeCleanup() {
+    const usage = await getDbUsage();
+    if (usage.disabled) return;
+    if (usage.error) {
+        console.error('[STORAGE] Bỏ qua kiểm tra cảnh báo/emergency chu kỳ này vì không đo được dung lượng.');
+        return;
+    }
+    lastKnownUsage = usage; lastKnownUsageAt = Date.now();
+
+    const state = classifyUsage(usage.ratio, STORAGE_THRESHOLDS);
+    if (state.emergencyCleanup) {
+        warnedAboveThreshold = false; // reset - emergencyStorageCleanup tu log chi tiet rieng
+        await emergencyStorageCleanup(usage);
+        return;
+    }
+    if (state.warning) {
+        if (!warnedAboveThreshold) {
+            console.warn(`[STORAGE WARNING] PostgreSQL storage usage is ${(usage.ratio * 100).toFixed(1)}% ` +
+                `(${usage.usedMB.toFixed(1)} MB / ${DB_STORAGE_LIMIT_MB} MB)`);
+            warnedAboveThreshold = true;
+        }
+    } else {
+        warnedAboveThreshold = false;
+    }
+}
+
 
 let cleanupRunning = false; // khoa don gian, du cho 1 instance server (Render Free = 1 instance)
 async function runCleanupCycle() {
@@ -359,7 +514,7 @@ async function runCleanupCycle() {
     cleanupRunning = true;
     try {
         await normalRetentionCleanup();
-        await emergencyStorageCleanup();
+        await checkStorageAndMaybeCleanup();
     } catch (err) {
         console.error('[CLEANUP] Loi trong chu ky don dep (server van tiep tuc hoat dong binh thuong):', err.message);
     } finally {
@@ -535,8 +690,40 @@ async function extractValidMentions(text) {
 }
 
 // ===================================================================
+// Reply: server tu doc tin nhan duoc reply (theo id client gui len) va tao
+// 1 "snapshot" PLAINTEXT (sender + doan trich text/nhan dien loai media) de
+// luu kem tin nhan moi - cung nguyen tac voi "mentions" (metadata hien thi,
+// khong phai noi dung ma hoa chinh). KHONG tin id client gui la hop le -
+// truy van lai DB, neu khong ton tai thi coi nhu khong reply gi ca.
+// ===================================================================
+const REPLY_PREVIEW_MAX_CHARS = 140;
+async function buildReplySnapshot(rawReplyToId) {
+    const replyToId = parseInt(rawReplyToId, 10);
+    if (!replyToId) return { reply_to_id: null, reply_to_sender: null, reply_to_preview: null };
+    const result = await pool.query(
+        'SELECT id, sender, msg_type, ciphertext, iv FROM messages WHERE id = $1',
+        [replyToId]
+    );
+    if (result.rows.length === 0) return { reply_to_id: null, reply_to_sender: null, reply_to_preview: null };
+    const row = result.rows[0];
+    let preview;
+    if (row.msg_type === 'text') {
+        try {
+            const text = decryptText(row.iv, row.ciphertext);
+            preview = text.length > REPLY_PREVIEW_MAX_CHARS ? text.slice(0, REPLY_PREVIEW_MAX_CHARS) + '…' : text;
+        } catch (err) {
+            preview = '⚠️ Không thể giải mã tin nhắn này.';
+        }
+    } else if (row.msg_type === 'image') {
+        preview = '📷 Hình ảnh';
+    } else {
+        preview = '🎥 Video';
+    }
+    return { reply_to_id: row.id, reply_to_sender: row.sender, reply_to_preview: preview };
+}
+
+// ===================================================================
 // Messages: doc danh sach (text duoc giai ma san, media chi tra metadata)
-// KHONG co endpoint xoa/thu hoi tin nhan (theo yeu cau nghiep vu).
 // ===================================================================
 app.get('/api/messages', authRequired, approvedRequired, async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
@@ -546,7 +733,8 @@ app.get('/api/messages', authRequired, approvedRequired, async (req, res) => {
         if (beforeId) {
             result = await pool.query(
                 `WITH base AS (
-                    SELECT id, sender, msg_type, ciphertext, iv, mime_type, byte_size, mentions, created_at
+                    SELECT id, sender, msg_type, ciphertext, iv, mime_type, byte_size, mentions, created_at,
+                           reply_to_id, reply_to_sender, reply_to_preview
                     FROM messages WHERE id < $1 ORDER BY id DESC LIMIT $2
                  )
                  SELECT b.*, COALESCE(
@@ -554,14 +742,16 @@ app.get('/api/messages', authRequired, approvedRequired, async (req, res) => {
                     '[]'
                  ) AS reactions
                  FROM base b LEFT JOIN message_reactions r ON r.message_id = b.id
-                 GROUP BY b.id, b.sender, b.msg_type, b.ciphertext, b.iv, b.mime_type, b.byte_size, b.mentions, b.created_at
+                 GROUP BY b.id, b.sender, b.msg_type, b.ciphertext, b.iv, b.mime_type, b.byte_size, b.mentions, b.created_at,
+                          b.reply_to_id, b.reply_to_sender, b.reply_to_preview
                  ORDER BY b.id ASC`,
                 [beforeId, limit]
             );
         } else {
             result = await pool.query(
                 `WITH base AS (
-                    SELECT id, sender, msg_type, ciphertext, iv, mime_type, byte_size, mentions, created_at
+                    SELECT id, sender, msg_type, ciphertext, iv, mime_type, byte_size, mentions, created_at,
+                           reply_to_id, reply_to_sender, reply_to_preview
                     FROM messages ORDER BY id DESC LIMIT $1
                  )
                  SELECT b.*, COALESCE(
@@ -569,7 +759,8 @@ app.get('/api/messages', authRequired, approvedRequired, async (req, res) => {
                     '[]'
                  ) AS reactions
                  FROM base b LEFT JOIN message_reactions r ON r.message_id = b.id
-                 GROUP BY b.id, b.sender, b.msg_type, b.ciphertext, b.iv, b.mime_type, b.byte_size, b.mentions, b.created_at
+                 GROUP BY b.id, b.sender, b.msg_type, b.ciphertext, b.iv, b.mime_type, b.byte_size, b.mentions, b.created_at,
+                          b.reply_to_id, b.reply_to_sender, b.reply_to_preview
                  ORDER BY b.id ASC`,
                 [limit]
             );
@@ -578,7 +769,8 @@ app.get('/api/messages', authRequired, approvedRequired, async (req, res) => {
         const messages = result.rows.map(row => {
             const out = {
                 id: row.id, sender: row.sender, msg_type: row.msg_type, mime_type: row.mime_type,
-                byte_size: row.byte_size, mentions: row.mentions, created_at: row.created_at, reactions: row.reactions
+                byte_size: row.byte_size, mentions: row.mentions, created_at: row.created_at, reactions: row.reactions,
+                reply_to_id: row.reply_to_id, reply_to_sender: row.reply_to_sender, reply_to_preview: row.reply_to_preview
             };
             if (row.msg_type === 'text') {
                 try {
@@ -608,7 +800,7 @@ app.get('/api/messages', authRequired, approvedRequired, async (req, res) => {
 
 // Gui tin nhan TEXT (JSON nho gon, khong con base64 media o day)
 app.post('/api/messages', authRequired, approvedRequired, async (req, res) => {
-    const { text } = req.body || {};
+    const { text, replyToId } = req.body || {};
     if (typeof text !== 'string' || !text.trim()) return res.status(400).json({ error: 'invalid_input' });
     if (text.length > MAX_TEXT_CHARS) {
         return res.status(400).json({ error: 'text_too_long', message: `Tin nhắn tối đa ${MAX_TEXT_CHARS} ký tự.` });
@@ -620,11 +812,15 @@ app.post('/api/messages', authRequired, approvedRequired, async (req, res) => {
     try {
         const mentions = await extractValidMentions(text);
         const { iv, ciphertext } = encryptText(text);
+        const reply = await buildReplySnapshot(replyToId);
         const result = await pool.query(
-            `INSERT INTO messages (sender, msg_type, ciphertext, iv, mime_type, byte_size, mentions)
-             VALUES ($1, 'text', $2, $3, NULL, $4, $5)
-             RETURNING id, sender, msg_type, mime_type, byte_size, mentions, created_at`,
-            [req.user.username, ciphertext, iv, Buffer.byteLength(text, 'utf8'), mentions]
+            `INSERT INTO messages (sender, msg_type, ciphertext, iv, mime_type, byte_size, mentions,
+                                    reply_to_id, reply_to_sender, reply_to_preview)
+             VALUES ($1, 'text', $2, $3, NULL, $4, $5, $6, $7, $8)
+             RETURNING id, sender, msg_type, mime_type, byte_size, mentions, created_at,
+                       reply_to_id, reply_to_sender, reply_to_preview`,
+            [req.user.username, ciphertext, iv, Buffer.byteLength(text, 'utf8'), mentions,
+             reply.reply_to_id, reply.reply_to_sender, reply.reply_to_preview]
         );
         const message = result.rows[0];
         message.text = text;
@@ -753,11 +949,17 @@ app.post('/api/messages/media', authRequired, approvedRequired, async (req, res,
     try {
         const { iv, ciphertext } = encryptBuffer(req.file.buffer);
         const msgType = isImage ? 'image' : 'video';
+        // req.body.replyToId: multer da parse xong cac field text cua multipart
+        // truoc khi route handler nay chay, nen co san o day giong nhu JSON body.
+        const reply = await buildReplySnapshot(req.body && req.body.replyToId);
         const result = await pool.query(
-            `INSERT INTO messages (sender, msg_type, ciphertext, iv, mime_type, byte_size, mentions)
-             VALUES ($1, $2, $3, $4, $5, $6, '{}')
-             RETURNING id, sender, msg_type, mime_type, byte_size, mentions, created_at`,
-            [req.user.username, msgType, ciphertext, iv, req.file.mimetype, req.file.size]
+            `INSERT INTO messages (sender, msg_type, ciphertext, iv, mime_type, byte_size, mentions,
+                                    reply_to_id, reply_to_sender, reply_to_preview)
+             VALUES ($1, $2, $3, $4, $5, $6, '{}', $7, $8, $9)
+             RETURNING id, sender, msg_type, mime_type, byte_size, mentions, created_at,
+                       reply_to_id, reply_to_sender, reply_to_preview`,
+            [req.user.username, msgType, ciphertext, iv, req.file.mimetype, req.file.size,
+             reply.reply_to_id, reply.reply_to_sender, reply.reply_to_preview]
         );
         const message = result.rows[0];
         message.reactions = [];
@@ -824,6 +1026,25 @@ app.post('/api/messages/:id/react', authRequired, approvedRequired, async (req, 
         broadcastToApproved({ type: 'reaction_updated', messageId, reactions });
     } catch (err) {
         console.error('Loi cap nhat reaction:', err);
+        res.status(500).json({ error: 'server_error' });
+    }
+});
+
+// Xoa tin nhan (CHI ADMIN). Khac voi "khong the xoa/thu hoi" cua STEP truoc -
+// day la yeu cau nghiep vu moi, gioi han rieng cho admin (adminRequired).
+// message_reactions bi xoa theo (ON DELETE CASCADE). Cac tin nhan reply toi
+// tin nay se mat reply_to_id (ON DELETE SET NULL) nhung van giu duoc
+// reply_to_sender/reply_to_preview (snapshot) de UI tiep tuc hien thi trich dan.
+app.delete('/api/messages/:id', authRequired, adminRequired, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ error: 'invalid_input' });
+    try {
+        const result = await pool.query('DELETE FROM messages WHERE id = $1 RETURNING id', [id]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'not_found' });
+        res.json({ success: true, id });
+        broadcastToApproved({ type: 'message_deleted', id });
+    } catch (err) {
+        console.error('Loi xoa message:', err);
         res.status(500).json({ error: 'server_error' });
     }
 });

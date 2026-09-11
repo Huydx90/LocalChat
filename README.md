@@ -5,9 +5,12 @@
 ## Tính năng
 
 - Đăng ký tự do, nhưng tài khoản mới ở trạng thái **chờ duyệt** — chưa thấy được nội dung/chat.
-- **Admin duy nhất**: `do.huy` (mật khẩu mặc định `14503246`, tự seed khi khởi động lần đầu; nên đổi qua biến môi trường).
+- **Admin duy nhất**: `do.huy`, tự seed khi khởi động lần đầu. Mật khẩu lấy từ biến môi trường `ADMIN_PASSWORD` — **bắt buộc phải đặt** khi `NODE_ENV=production` (server từ chối khởi động nếu thiếu, giống `JWT_SECRET`/`MESSAGE_ENCRYPTION_KEY`, không còn mật khẩu mặc định công khai trong code).
 - Admin duyệt (cấp quyền) user, thu hồi quyền, và **xóa** user.
-- Tin nhắn **không thể xóa/thu hồi** — không có endpoint xóa/sửa tin nhắn.
+- Tin nhắn thường **không thể tự xóa/thu hồi bởi người gửi** — chỉ **admin** mới có quyền xóa (`DELETE /api/messages/:id`, xem mục "Reply & Delete" bên dưới). Vẫn không có endpoint sửa nội dung tin nhắn.
+- **Reply (trả lời)**: bấm chuột phải / giữ (chuột trái hoặc chạm giữ trên cảm ứng) vào 1 bong bóng chat để mở submenu, chọn "Trả lời" — ô nhập hiện thanh trích dẫn tin nhắn gốc, gửi đi thì bong bóng mới hiển thị phần trích dẫn (người gửi + đoạn preview) phía trên nội dung mới, giống UI trích dẫn của WhatsApp/Messenger.
+- **Xem ảnh lớn**: double-click (double-tap) vào ảnh trong bong bóng chat để xem phóng to giữa màn hình (lightbox), bấm ✕ hoặc click ra ngoài để đóng.
+- **Video**: trong khung chat chỉ hiển thị khung preview (không có control phát), double-click (double-tap) để mở trình phát video lớn giữa màn hình.
 - Gửi/xem **ảnh và video**, có giới hạn dung lượng (xem bên dưới). Hỗ trợ ảnh **HEIC/HEIF** (iPhone) — tự động chuyển sang JPEG.
 - **Emotion**: nút 😊 cạnh ô nhập mở bảng emoji theo danh mục — bấm 1 emoji sẽ **gửi ngay như tin nhắn text bình thường** (không tạo API/bảng riêng, tự áp dụng mã hóa + retention 48h có sẵn). Tin nhắn chỉ gồm 1-3 emoji được hiển thị lớn hơn.
 - Mỗi bong bóng chat có **nút copy nổi** và **nút thả cảm xúc (reaction)** (👍 ❤️ 😂 😮 😢 😡 🎉) — khác với Emotion: reaction gắn vào 1 tin nhắn có sẵn, lưu ở bảng `message_reactions` riêng, không tạo tin nhắn mới.
@@ -67,28 +70,51 @@ Không cần cấu hình gì thêm — chỉ cần `npm install` lại để có
 
 ## Message retention (48h) + rolling/emergency cleanup + hard-block guard
 
-- **Bình thường**: tin nhắn tự động bị xóa sau `MESSAGE_RETENTION_HOURS` giờ (mặc định **48**). Chạy định kỳ mỗi 10 phút, xóa theo batch (`EMERGENCY_DELETE_BATCH_SIZE`, mặc định 500) để tránh transaction quá lớn.
-- **Rolling/emergency** (giống camera hành trình — vòng lặp dữ liệu): nếu dung lượng PostgreSQL vượt ngưỡng, server chủ động xóa **tin nhắn cũ nhất trước**, kể cả khi chưa đủ 48h, cho tới khi về vùng an toàn.
-  - `DB_WARNING_RATIO = 0.80` — bắt đầu cảnh báo.
-  - `DB_EMERGENCY_RATIO = 0.90` — bắt đầu xóa cũ-nhất-trước.
-  - `DB_TARGET_RATIO = 0.75` — mục tiêu sau khi dọn xong.
-  - Tính năng này **chỉ hoạt động nếu đặt `DB_STORAGE_LIMIT_MB`** (dung lượng **thực tế** của gói Postgres bạn đang dùng trên Render — kiểm tra trong Render dashboard, không đoán/mặc định 1024 MB). Lý do: PostgreSQL không có API/SQL portable để biết chính xác quota của Render, nên `usage_ratio = pg_database_size(...) / DB_STORAGE_LIMIT_MB` cần cấu hình thủ công.
-- **⚠️ Giới hạn thật của PostgreSQL cần biết**: `DELETE` **không** làm `pg_database_size()` giảm ngay lập tức — nó chỉ tạo dead tuples, dung lượng file trên đĩa chỉ thực sự giảm khi `VACUUM FULL`/`pg_repack` rewrite lại bảng (không chạy tự động ở đây vì cần khóa mạnh, block cả bảng). Vì vậy emergency cleanup có thể xóa rất nhiều tin nhắn mà tỷ lệ dung lượng gần như không giảm ngay — server **log trung thực** điều này (cảnh báo riêng) thay vì giả vờ đã "finished" thành công. Sau mỗi lần emergency cleanup, server chạy thêm `VACUUM (ANALYZE) messages` (an toàn, không phải `VACUUM FULL`, không khóa bảng) như một nỗ lực best-effort giúp Postgres tái sử dụng vùng trống — nhưng **đây không phải cam kết giảm dung lượng ngay**.
-- **Hard-block guard (lớp phòng thủ thứ hai, độc lập với cleanup)**: nếu sau khi cleanup mà dung lượng vẫn ở mức nguy hiểm, server **tạm từ chối nhận nội dung mới** thay vì để INSERT tiếp tục đẩy DB đến 100% rồi crash:
-  - `DB_HARD_BLOCK_MEDIA_RATIO = 0.95` — ảnh/video bị từ chối (503) trước.
-  - `DB_HARD_BLOCK_TEXT_RATIO = 0.99` — text bị từ chối muộn hơn nhiều (ưu tiên chat chữ vẫn hoạt động được lâu nhất có thể vì dung lượng rất nhỏ).
-  - Giá trị dung lượng được cache tối đa 30 giây (tránh query `pg_database_size()` mỗi request) và tự làm mới ngay sau khi có video mới được lưu.
-- Xóa dùng khóa đơn giản trong bộ nhớ (`cleanupRunning`) để tránh nhiều chu kỳ dọn dẹp chạy chồng nhau — đủ dùng vì Render Free chỉ chạy 1 instance.
+- **Bình thường**: tin nhắn tự động bị xóa sau `MESSAGE_RETENTION_HOURS` giờ (mặc định **48**). Chạy định kỳ mỗi 10 phút (và ngay lúc khởi động), xóa theo batch (`EMERGENCY_DELETE_BATCH_SIZE`, mặc định 500), thứ tự **tất định** `ORDER BY created_at ASC, id ASC` (không chỉ `created_at` — nhiều tin có thể cùng timestamp, `id` là tiêu chí phụ để thứ tự luôn nhất quán).
+- **Rolling/emergency**: nếu dung lượng PostgreSQL vượt ngưỡng, server chủ động xóa **tin nhắn cũ nhất trước** (cùng thứ tự tất định ở trên), kể cả khi chưa đủ 48h, cho tới khi về vùng an toàn. Tính năng này **chỉ hoạt động nếu đặt `DB_STORAGE_LIMIT_MB`** (dung lượng **thực tế** của gói Postgres trên Render — kiểm tra trong Render dashboard, không đoán/mặc định).
+
+### Bảng hành vi theo ngưỡng (khi đã cấu hình `DB_STORAGE_LIMIT_MB`)
+
+| Dung lượng DB | Hành vi |
+|---|---|
+| `< 80%` | Bình thường |
+| `80% – 89.99%` | **Cảnh báo** — log `[STORAGE WARNING]` (log 1 lần khi vừa vào vùng này, không lặp lại mỗi 10 phút nếu vẫn ở nguyên trạng thái) |
+| `90% – 94.99%` | Emergency cleanup chạy — xóa cũ-nhất-trước theo batch tới khi về dưới `DB_TARGET_RATIO` (0.75) hoặc hết tin để xóa |
+| `95% – 98.99%` | Emergency cleanup vẫn chạy **+** ảnh/video bị từ chối (503) — text vẫn được gửi |
+| `99% – 100%` | Ảnh/video **và** text đều bị từ chối (503) |
+
+Các mức này **chồng lấn có chủ đích** — ví dụ 96% nghĩa là: emergency cleanup đang chạy, media bị chặn, nhưng text vẫn được phép (vì text rất nhỏ, ưu tiên giữ chat hoạt động lâu nhất có thể).
+
+- `DB_WARNING_RATIO=0.80`, `DB_EMERGENCY_RATIO=0.90`, `DB_TARGET_RATIO=0.75`, `DB_HARD_BLOCK_MEDIA_RATIO=0.95`, `DB_HARD_BLOCK_TEXT_RATIO=0.99` — các ngưỡng này được **validate quan hệ logic lúc khởi động** (`0 < TARGET < EMERGENCY`, `0 < WARNING < EMERGENCY`, `EMERGENCY <= HARD_BLOCK_MEDIA <= HARD_BLOCK_TEXT`); nếu cấu hình sai, server **từ chối khởi động** với lỗi rõ ràng thay vì chạy âm thầm với ngưỡng không an toàn.
+- **⚠️ Giới hạn thật của PostgreSQL cần biết**: `DELETE` **không** làm `pg_database_size()` giảm ngay lập tức — nó chỉ tạo dead tuples; dung lượng file trên đĩa chỉ thực sự giảm khi `VACUUM FULL`/`pg_repack` rewrite lại bảng (không chạy tự động ở đây vì cần khóa mạnh, block cả bảng). Emergency cleanup vì vậy **luôn đo lại thật** (`pg_database_size()`) sau mỗi batch thay vì giả định con số giảm, và log trung thực nếu tỷ lệ vẫn cao sau khi dọn xong (không giả vờ "finished thành công"). Sau đó chạy thêm `VACUUM (ANALYZE) messages` (an toàn, không phải `VACUUM FULL`) như một nỗ lực best-effort — **không phải cam kết giảm dung lượng ngay**.
+- **Đo dung lượng thất bại thì sao?** (ví dụ Postgres tạm mất kết nối): server không bao giờ crash vì việc này. Với **media**, hệ thống fail-closed — tạm từ chối upload (503, "không xác minh được dung lượng") vì upload lớn rủi ro cao hơn. Với **text**, hệ thống fail-open — vẫn cho gửi (không muốn 1 lần đo lỗi tạm thời làm gián đoạn cả phòng chat), lỗi được log lại để admin biết.
+- **Cache dung lượng**: tối đa 30 giây để tránh gọi `pg_database_size()` mỗi request. Cache này chỉ an toàn khi còn cách xa ngưỡng hard-block — nếu số liệu cache gần nhất đã nằm trong phạm vi 3 điểm % dưới `DB_HARD_BLOCK_MEDIA_RATIO`, server **bắt buộc đo lại thật** thay vì tin cache, để tránh nhiều upload đồng thời cùng "nhìn thấy" một con số cũ và cùng vượt ngưỡng.
+- Cleanup dùng khóa đơn giản trong bộ nhớ (`cleanupRunning`, `try/finally`) để tránh nhiều chu kỳ dọn dẹp chạy chồng nhau — đủ dùng vì Render Free chỉ chạy 1 instance; không cần advisory lock của Postgres.
+- Mỗi vòng emergency cleanup có giới hạn cứng `MAX_CLEANUP_ITERATIONS` (mặc định 50) để không bao giờ là vòng lặp vô hạn; lý do dừng (đạt target / hết tin / đo lỗi / hết vòng lặp) luôn được log.
 - `message_reactions` có `ON DELETE CASCADE` theo `messages.id` nên xóa tin nhắn không để lại reaction mồ côi.
+
+### ⚠️ Kiểm thử ngưỡng lưu trữ — KHÔNG làm trên database Render production
+
+Không cố tình đẩy database Render thật lên 80/90/95/99% để test. Thay vào đó:
+
+- **Unit test (không cần Postgres, chạy được ngay)**: `npm test` — kiểm tra toàn bộ logic phân loại ngưỡng (`storage-policy.js`) bằng tỷ lệ dung lượng **giả lập** 0%→100%, bao gồm đúng 10 trường hợp bắt buộc (0%, 79%, 80%, 89%, 90%, 94%, 95%, 98%, 99%, 100%) và validate cấu hình ngưỡng.
+- **Integration test (cần Postgres thật, KHÔNG dùng DB production)**: `npm run test:integration` — đọc biến `TEST_DATABASE_URL` riêng biệt (không bao giờ trùng với `DATABASE_URL` mà app dùng), dùng bảng tạm rồi tự xóa, tự `SKIP` nếu chưa đặt biến này. Ví dụ chạy với Postgres tạm qua Docker:
+  ```
+  docker run --rm -e POSTGRES_PASSWORD=test -p 5433:5432 -d postgres:16
+  TEST_DATABASE_URL=postgres://postgres:test@localhost:5433/postgres npm run test:integration
+  ```
+  Các test này xác nhận: thứ tự xóa cũ-nhất-trước tất định, retention 48h, và reaction cascade — bằng SQL thật, không phải mock.
 
 ## Cấu trúc
 
 ```
-server.js              # Express REST API + WebSocket + PostgreSQL + AES-256-GCM + retention
-migrations/             # Migration SQL đơn giản, tự chạy khi khởi động (bảng schema_migrations theo dõi)
-public/index.html       # Giao diện SPA (login/register/chat/admin)
-public/app.js            # Toàn bộ logic client: auth, nén ảnh, upload, hiển thị, reactions, admin
-public/style.css         # Giao diện tối, tông teal/cyan
+server.js               # Express REST API + WebSocket + PostgreSQL + AES-256-GCM + retention
+storage-policy.js        # Logic THUẦN TÚY phân loại ngưỡng dung lượng (không Postgres) — dùng chung bởi server.js và unit test
+migrations/              # Migration SQL đơn giản, tự chạy khi khởi động (bảng schema_migrations theo dõi)
+test/                     # Unit test (storage-policy) + integration test (*.integration.test.js, cần TEST_DATABASE_URL)
+public/index.html        # Giao diện SPA (login/register/chat/admin)
+public/app.js             # Toàn bộ logic client: auth, nén ảnh, upload, hiển thị, reactions, admin
+public/style.css          # Giao diện tối, tông teal/cyan
 ```
 
 ## Chạy local
@@ -113,20 +139,44 @@ Mở `http://localhost:3000`.
    - `JWT_SECRET` — chuỗi ngẫu nhiên dài, bí mật
    - `MESSAGE_ENCRYPTION_KEY` — tạo bằng `openssl rand -base64 32` (**bắt buộc**, server không khởi động nếu thiếu khi production)
    - `NODE_ENV=production`
-   - `ADMIN_USERNAME` / `ADMIN_PASSWORD` — tùy chọn, mặc định `do.huy` / `14503246`
+   - `ADMIN_USERNAME` — tùy chọn, mặc định `do.huy`
+   - `ADMIN_PASSWORD` — **bắt buộc** khi production (server từ chối khởi động nếu thiếu), đặt một mật khẩu mạnh
    - `DB_STORAGE_LIMIT_MB` — dung lượng gói Postgres (MB), để bật rolling cleanup
    - (tùy chọn) `MESSAGE_RETENTION_HOURS`, `DB_WARNING_RATIO`, `DB_EMERGENCY_RATIO`, `DB_TARGET_RATIO`, `EMERGENCY_DELETE_BATCH_SIZE`, `MAX_IMAGE_BYTES`, `MAX_VIDEO_BYTES`
 5. Deploy. Render tự cấp `PORT`.
 6. Đăng nhập bằng tài khoản admin, đăng ký thử vài tài khoản khác để kiểm tra luồng duyệt.
 
-## Đối chiếu code với checklist test (Encryption / Retention / Rolling cleanup / Hard-block)
+## STEP 2.1 — Audit & hardening (storage safety)
 
-Đã đọc lại toàn bộ `server.js` để xác nhận logic khớp với checklist test đã thống nhất. Các mục dưới đây là **kết quả review code**, không phải kết quả chạy test thật trên Render (cần Postgres thật + mạng, không có trong môi trường review này) — vẫn cần tự chạy Test 4.1–4.3, 5, 6, 7 trực tiếp trên Render/staging như checklist mô tả trước khi tin tưởng hoàn toàn:
+STEP 2.1 audit lại toàn bộ implementation storage-safety ở trên (không giả định report của bước trước đúng), và sửa các vấn đề tìm được:
 
-- **Test 4 (encryption)**: cột `ciphertext`/`iv` là `BYTEA`, ghi bằng `encryptBuffer`/`encryptText` (AES-256-GCM), không có đường nào ghi plaintext trực tiếp vào bảng `messages`. Khóa đọc 1 lần từ `MESSAGE_ENCRYPTION_KEY` lúc khởi động (`loadEncryptionKey()`) — không tạo khóa mới mỗi lần deploy nếu biến môi trường được set cố định trên Render. Nếu thiếu biến này khi `NODE_ENV=production`, server từ chối khởi động (không tự tạo khóa ngẫu nhiên) — đúng yêu cầu "không được tạo key mới mỗi lần deploy".
-- **Test 5 (48h retention)**: `MESSAGE_RETENTION_HOURS` đọc từ env, `normalRetentionCleanup()` xóa theo `created_at < cutoff`, chạy mỗi 10 phút (`CLEANUP_INTERVAL_MS`) và ngay lúc khởi động (`runCleanupCycle()` gọi trong `start()`). `message_reactions` có `ON DELETE CASCADE` nên xóa message tự xóa theo reaction, không mồ côi. Test bằng cách set `MESSAGE_RETENTION_HOURS=1` như checklist đề xuất là đúng hướng.
-- **Test 6 (rolling/emergency cleanup)**: `emergencyStorageCleanup()` xóa theo batch (`EMERGENCY_DELETE_BATCH_SIZE`), luôn `ORDER BY created_at ASC` (cũ nhất trước) — không xóa ngẫu nhiên. Code đã tự xử lý đúng vấn đề MVCC được nêu trong checklist: không giả định `pg_database_size()` giảm ngay sau `DELETE`, luôn đo lại thật (`getDbUsage()`) sau mỗi batch, và chạy `VACUUM (ANALYZE)` best-effort sau cùng (không phải `VACUUM FULL`, an toàn để chạy online).
-- **Test hard-block**: `checkStorageGuard('media')` dùng `DB_HARD_BLOCK_MEDIA_RATIO` (mặc định 0.95), `checkStorageGuard('text')` dùng `DB_HARD_BLOCK_TEXT_RATIO` (mặc định 0.99) — đúng thứ tự media bị chặn sớm hơn text như checklist yêu cầu.
+- **Cảnh báo 80% chưa từng được log** — `DB_WARNING_RATIO` chỉ được định nghĩa/validate nhưng không có code nào thực sự log cảnh báo khi usage vào vùng 80–90%. Đã thêm `checkStorageAndMaybeCleanup()`, chạy mỗi chu kỳ cleanup (10 phút), log `[STORAGE WARNING]` một lần khi vừa vào vùng cảnh báo (không spam log nếu vẫn ở nguyên trạng thái nhiều giờ).
+- **Thứ tự xóa chưa thực sự tất định** — trước đây chỉ `ORDER BY created_at ASC`; nhiều tin có thể trùng `created_at` (gửi liên tiếp), lúc đó Postgres không đảm bảo thứ tự vật lý. Đã sửa thành `ORDER BY created_at ASC, id ASC` ở cả `normalRetentionCleanup` và `emergencyStorageCleanup`.
+- **Đo dung lượng thất bại có thể treo request** — `checkStorageGuard()` trước đây `await` thẳng một query có thể throw mà không có try/catch bọc ngoài; nếu `pg_database_size()` lỗi tạm thời, request có thể không bao giờ nhận được response. Đã tách rõ 3 trạng thái (`disabled` / `error` / đo thành công) và xử lý fail-closed cho media, fail-open cho text (xem bảng ngưỡng ở trên).
+- **Cache 30 giây có thể bị lợi dụng gần ngưỡng hard-block** — nhiều upload đồng thời trong cửa sổ cache có thể cùng vượt ngưỡng mà không ai bị chặn. Đã thêm quy tắc: trong phạm vi 3 điểm % dưới `DB_HARD_BLOCK_MEDIA_RATIO`, luôn đo lại thật thay vì tin cache.
+- **Cấu hình ngưỡng sai chỉ warn, không fail-fast** — đã đổi thành từ chối khởi động (`process.exit(1)`) nếu quan hệ `0 < TARGET < EMERGENCY`, `0 < WARNING < EMERGENCY`, `EMERGENCY <= HARD_BLOCK_MEDIA <= HARD_BLOCK_TEXT` bị vi phạm.
+- **`.env.example` chứa mật khẩu admin thật (`14503246`)** — đây cũng là fallback mặc định hard-code trong `server.js`, nghĩa là quên đặt `ADMIN_PASSWORD` trên Render sẽ tạo tài khoản admin với mật khẩu đã lộ trong repo. Đã áp dụng đúng pattern fail-fast sẵn có cho `JWT_SECRET`/`MESSAGE_ENCRYPTION_KEY`: server từ chối khởi động ở production nếu thiếu `ADMIN_PASSWORD`.
+- **Logic phân loại ngưỡng không thể unit-test được** — `server.js` gọi `process.exit(1)` ngay khi load nếu thiếu `DATABASE_URL`/`JWT_SECRET`/`MESSAGE_ENCRYPTION_KEY`, nên không thể `require('./server.js')` an toàn trong test. Đã tách logic phân loại thuần túy ra `storage-policy.js` (không Postgres, không side-effect) — xem mục kiểm thử ở trên.
+
+Các phần **không đổi** (đã đúng từ trước, chỉ audit xác nhận): `VACUUM (ANALYZE)` best-effort đúng cách (không phải `VACUUM FULL`, không chạy trong request), `cleanupRunning` + `try/finally` chống chạy chồng, `message_reactions ON DELETE CASCADE`, index `idx_messages_created_at`, hard-block kiểm tra **trước** khi nhận multipart upload, giới hạn ảnh/video 500KB/10MB, kiến trúc mã hóa AES-256-GCM.
+
+## STEP 2.2 — Configuration validation (audit finding sau STEP 2.1)
+
+Audit lại STEP 2.1 phát hiện: dù đã có `validateThresholds()` fail-fast cho *quan hệ* giữa các ngưỡng, việc **đọc** từng biến môi trường vẫn dùng pattern `parseFloat(process.env.X) || default` / `parseInt(process.env.X, 10) || default`. Pattern này âm thầm nuốt mọi giá trị falsy:
+
+- `DB_WARNING_RATIO=0` → `parseFloat("0")` là `0` (falsy) → `0 || 0.80` → **âm thầm thành `0.80`**, `validateThresholds()` không bao giờ thấy giá trị `0` thật sự được cấu hình.
+- `DB_WARNING_RATIO=abc` → `parseFloat("abc")` là `NaN` (falsy) → cũng âm thầm thành `0.80`.
+- `DB_STORAGE_LIMIT_MB=abc` → `parseInt("abc", 10)` là `NaN` → `if (!DB_STORAGE_LIMIT_MB)` coi như **chưa cấu hình** → tắt luôn rolling cleanup/hard-block mà người vận hành tưởng đã bật.
+
+Đã sửa bằng `parseEnvNumber()` (`storage-policy.js`, hàm thuần túy, có unit test riêng) phân biệt rõ 3 trường hợp:
+
+1. **Chưa cấu hình** (`undefined`/`null`/chuỗi rỗng sau `trim()`) → dùng giá trị mặc định.
+2. **Có cấu hình nhưng không phải số hợp lệ** (`"abc"`, `"12abc"`) → `throw Error` → server từ chối khởi động (`process.exit(1)`), không còn âm thầm fallback.
+3. **Có cấu hình, là số, nhưng vi phạm ràng buộc** (âm, không nguyên khi cần nguyên, hoặc dưới `min`) → `throw Error` → fail-fast. Riêng `0`/số âm cho các ngưỡng tỉ lệ (`DB_WARNING_RATIO`...) được giữ nguyên giá trị thật và để `validateThresholds()` bắt lỗi (đúng vùng trách nhiệm sẵn có), thay vì bị nuốt trước khi tới bước validate.
+
+Áp dụng cho toàn bộ biến số trong cấu hình: `MESSAGE_RETENTION_HOURS`, `DB_STORAGE_LIMIT_MB` (đặc biệt: `0`/`"abc"` FAIL, chỉ *thực sự không set* mới hợp lệ để tắt tính năng), `DB_WARNING_RATIO`, `DB_EMERGENCY_RATIO`, `DB_TARGET_RATIO`, `DB_HARD_BLOCK_MEDIA_RATIO`, `DB_HARD_BLOCK_TEXT_RATIO`, `EMERGENCY_DELETE_BATCH_SIZE`, `MAX_CLEANUP_ITERATIONS`, `MAX_IMAGE_BYTES`, `MAX_VIDEO_BYTES`.
+
+11 unit test mới trong `test/storage-policy.test.js` (tổng 29/29 PASS) tái hiện đúng các ví dụ audit yêu cầu: `DB_WARNING_RATIO=0`, `DB_WARNING_RATIO=abc`, `DB_EMERGENCY_RATIO=-1`, `DB_STORAGE_LIMIT_MB=abc`, `DB_STORAGE_LIMIT_MB=0`, `MAX_CLEANUP_ITERATIONS=abc` — tất cả đều chứng minh **không** còn âm thầm rơi về default.
 
 ## Lưu ý quan trọng
 

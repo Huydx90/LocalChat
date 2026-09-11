@@ -7,7 +7,9 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/storage-policy.test.js",
+    "test:integration": "node --test test/*.integration.test.js"
   },
   "dependencies": {
     "express": "^4.19.2",
