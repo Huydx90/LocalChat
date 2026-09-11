@@ -8,8 +8,9 @@
 - **Admin duy nhất**: `do.huy` (mật khẩu mặc định `14503246`, tự seed khi khởi động lần đầu; nên đổi qua biến môi trường).
 - Admin duyệt (cấp quyền) user, thu hồi quyền, và **xóa** user.
 - Tin nhắn **không thể xóa/thu hồi** — không có endpoint xóa/sửa tin nhắn.
-- Gửi/xem **ảnh và video**, có giới hạn dung lượng (xem bên dưới).
-- Mỗi bong bóng chat có **nút copy nổi** và **nút thả cảm xúc** (👍 ❤️ 😂 😮 😢 🙏).
+- Gửi/xem **ảnh và video**, có giới hạn dung lượng (xem bên dưới). Hỗ trợ ảnh **HEIC/HEIF** (iPhone) — tự động chuyển sang JPEG.
+- **Emotion**: nút 😊 cạnh ô nhập mở bảng emoji theo danh mục — bấm 1 emoji sẽ **gửi ngay như tin nhắn text bình thường** (không tạo API/bảng riêng, tự áp dụng mã hóa + retention 48h có sẵn). Tin nhắn chỉ gồm 1-3 emoji được hiển thị lớn hơn.
+- Mỗi bong bóng chat có **nút copy nổi** và **nút thả cảm xúc (reaction)** (👍 ❤️ 😂 😮 😢 🙏) — khác với Emotion: reaction gắn vào 1 tin nhắn có sẵn, lưu ở bảng `message_reactions` riêng, không tạo tin nhắn mới.
 - Tin nhắn mới **báo hiệu realtime** cho mọi client qua WebSocket (chấm đỏ + số chưa đọc trong app — **không** đẩy push notification ra hệ điều hành).
 - Hỗ trợ **tag @username** trong phòng chat (autocomplete khi gõ `@`).
 
@@ -36,6 +37,33 @@ Client  --HTTPS/WSS (TLS)-->  Server  --AES-256-GCM-->  PostgreSQL
 | Video | ≤ 10 MB (10485760 bytes) | Client chỉ kiểm tra dung lượng (không encode); **server kiểm tra lại**, từ chối (413) nếu vượt |
 
 Ảnh/video được truyền lên bằng `multipart/form-data` (không còn base64 trong JSON) để giảm overhead (~33%) và tránh phải giữ payload khổng lồ trong RAM. Khi hiển thị, client tải nội dung qua endpoint riêng `GET /api/messages/:id/media` (đã xác thực), server giải mã và trả về nhị phân trực tiếp.
+
+### Ảnh HEIC/HEIF (iPhone)
+
+Kiến trúc ưu tiên **client convert trước, server convert là fallback** — database/viewer cuối cùng chỉ bao giờ thấy JPEG/PNG/WebP/GIF, không bao giờ lưu HEIC nguyên bản:
+
+```
+Chọn ảnh .heic/.heif
+        ↓
+Client: thư viện heic2any (CDN) → JPEG
+        ↓ (nếu thất bại/không tải được thư viện)
+Gửi thẳng file HEIC gốc lên server
+        ↓
+Client/JPEG đi qua pipeline nén hiện tại (resize + giảm quality) → ≤500KB
+        ↓
+Server nhận file:
+  - Nếu là JPEG/PNG/WebP/GIF hợp lệ → lưu như bình thường (không đổi)
+  - Nếu là HEIC/HEIF (nhận diện qua magic bytes "ftyp" box, KHÔNG tin
+    mimetype/extension client gửi) → server tự convert bằng `heic-convert`
+    (thư viện pure-JS/WASM, không cần biên dịch native) → JPEG
+  - Nếu convert thất bại hoặc kết quả vẫn > 500KB sau khi đã thử giảm
+    quality → trả lỗi rõ ràng (400/413) cho client, KHÔNG lưu HEIC
+    không tương thích vào database
+        ↓
+Encrypt (AES-256-GCM) → PostgreSQL, giống mọi ảnh khác
+```
+
+Không cần cấu hình gì thêm — chỉ cần `npm install` lại để có `heic-convert` trong `node_modules` (server fallback), và server phải có Internet ra ngoài để tải `heic2any` qua CDN trong `index.html` (nếu mạng công ty chặn CDN, tính năng tự rớt xuống fallback server, không lỗi/crash).
 
 ## Message retention (48h) + rolling/emergency cleanup + hard-block guard
 
@@ -90,6 +118,15 @@ Mở `http://localhost:3000`.
    - (tùy chọn) `MESSAGE_RETENTION_HOURS`, `DB_WARNING_RATIO`, `DB_EMERGENCY_RATIO`, `DB_TARGET_RATIO`, `EMERGENCY_DELETE_BATCH_SIZE`, `MAX_IMAGE_BYTES`, `MAX_VIDEO_BYTES`
 5. Deploy. Render tự cấp `PORT`.
 6. Đăng nhập bằng tài khoản admin, đăng ký thử vài tài khoản khác để kiểm tra luồng duyệt.
+
+## Đối chiếu code với checklist test (Encryption / Retention / Rolling cleanup / Hard-block)
+
+Đã đọc lại toàn bộ `server.js` để xác nhận logic khớp với checklist test đã thống nhất. Các mục dưới đây là **kết quả review code**, không phải kết quả chạy test thật trên Render (cần Postgres thật + mạng, không có trong môi trường review này) — vẫn cần tự chạy Test 4.1–4.3, 5, 6, 7 trực tiếp trên Render/staging như checklist mô tả trước khi tin tưởng hoàn toàn:
+
+- **Test 4 (encryption)**: cột `ciphertext`/`iv` là `BYTEA`, ghi bằng `encryptBuffer`/`encryptText` (AES-256-GCM), không có đường nào ghi plaintext trực tiếp vào bảng `messages`. Khóa đọc 1 lần từ `MESSAGE_ENCRYPTION_KEY` lúc khởi động (`loadEncryptionKey()`) — không tạo khóa mới mỗi lần deploy nếu biến môi trường được set cố định trên Render. Nếu thiếu biến này khi `NODE_ENV=production`, server từ chối khởi động (không tự tạo khóa ngẫu nhiên) — đúng yêu cầu "không được tạo key mới mỗi lần deploy".
+- **Test 5 (48h retention)**: `MESSAGE_RETENTION_HOURS` đọc từ env, `normalRetentionCleanup()` xóa theo `created_at < cutoff`, chạy mỗi 10 phút (`CLEANUP_INTERVAL_MS`) và ngay lúc khởi động (`runCleanupCycle()` gọi trong `start()`). `message_reactions` có `ON DELETE CASCADE` nên xóa message tự xóa theo reaction, không mồ côi. Test bằng cách set `MESSAGE_RETENTION_HOURS=1` như checklist đề xuất là đúng hướng.
+- **Test 6 (rolling/emergency cleanup)**: `emergencyStorageCleanup()` xóa theo batch (`EMERGENCY_DELETE_BATCH_SIZE`), luôn `ORDER BY created_at ASC` (cũ nhất trước) — không xóa ngẫu nhiên. Code đã tự xử lý đúng vấn đề MVCC được nêu trong checklist: không giả định `pg_database_size()` giảm ngay sau `DELETE`, luôn đo lại thật (`getDbUsage()`) sau mỗi batch, và chạy `VACUUM (ANALYZE)` best-effort sau cùng (không phải `VACUUM FULL`, an toàn để chạy online).
+- **Test hard-block**: `checkStorageGuard('media')` dùng `DB_HARD_BLOCK_MEDIA_RATIO` (mặc định 0.95), `checkStorageGuard('text')` dùng `DB_HARD_BLOCK_TEXT_RATIO` (mặc định 0.99) — đúng thứ tự media bị chặn sớm hơn text như checklist yêu cầu.
 
 ## Lưu ý quan trọng
 

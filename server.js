@@ -20,6 +20,11 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const { Pool } = require('pg');
+// STEP NEXT (HEIC): pure-JS/WASM decoder (libheif-js under the hood) - khong can
+// bien dich native (khac sharp/libvips), phu hop moi truong Render web service
+// binh thuong. Chi dung lam FALLBACK phia server khi client khong tu convert
+// duoc (xem prepareImageForUpload() ben client va route /api/messages/media).
+const heicConvert = require('heic-convert');
 
 const app = express();
 app.set('trust proxy', true); // chay sau reverse proxy cua Render.com
@@ -84,6 +89,10 @@ const MAX_VIDEO_BYTES = parseInt(process.env.MAX_VIDEO_BYTES, 10) || 10485760;  
 const MAX_TEXT_CHARS = 4000;
 const ALLOWED_IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 const ALLOWED_VIDEO_MIMES = ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska'];
+// STEP NEXT (HEIC): anh HEIC/HEIF duoc chap nhan RIENG o day va LUON duoc convert
+// sang JPEG truoc khi luu - database/viewer hien tai khong bao gio thay HEIC.
+const HEIC_MIMES = ['image/heic', 'image/heif'];
+const HEIC_EXT_RE = /\.(heic|heif)$/i;
 
 const ALLOWED_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
@@ -627,6 +636,32 @@ app.post('/api/messages', authRequired, approvedRequired, async (req, res) => {
 });
 
 // ===================================================================
+// HEIC/HEIF: nhan dien that su bang magic bytes (ISO-BMFF "ftyp" box), KHONG
+// tin vao mimetype/extension do client tu bao (nhieu OS/browser gui mimetype
+// rong hoac application/octet-stream cho HEIC). Day la lop validate CUOI CUNG
+// truoc khi quyet dinh co convert hay khong.
+// ===================================================================
+const HEIC_BRANDS = ['heic', 'heix', 'hevc', 'hevx', 'mif1', 'msf1', 'heim', 'heis', 'hevm', 'hevs'];
+function looksLikeHeicBuffer(buf) {
+    if (!buf || buf.length < 12) return false;
+    if (buf.toString('ascii', 4, 8) !== 'ftyp') return false;
+    const brand = buf.toString('ascii', 8, 12).toLowerCase();
+    return HEIC_BRANDS.includes(brand);
+}
+
+// Convert 1 buffer HEIC/HEIF sang JPEG buffer. Thu giam quality 1 lan neu ket
+// qua dau tien vuot MAX_IMAGE_BYTES (server khong co pipeline resize day du
+// nhu client - canvas - nen chi con don bay quality de co gang lot duoi gioi
+// han truoc khi phai reject).
+async function convertHeicToJpeg(buf) {
+    let out = await heicConvert({ buffer: buf, format: 'JPEG', quality: 0.82 });
+    if (out.length > MAX_IMAGE_BYTES) {
+        out = await heicConvert({ buffer: buf, format: 'JPEG', quality: 0.5 });
+    }
+    return out;
+}
+
+// ===================================================================
 // Upload anh/video: multipart (KHONG con base64 trong JSON), gioi han
 // nghiem ngat ca client lan server. Server khong bao gio tin client.
 // ===================================================================
@@ -634,7 +669,17 @@ const upload = multer({
     storage: multer.memoryStorage(), // buffer bi chan boi limits.fileSize ngay ben duoi -> khong doc vo han vao RAM
     limits: { fileSize: MAX_VIDEO_BYTES, files: 1 }, // gioi han cung o muc lon nhat (video); anh se bi kiem tra rieng ben duoi
     fileFilter: (req, file, cb) => {
-        if (ALLOWED_IMAGE_MIMES.includes(file.mimetype) || ALLOWED_VIDEO_MIMES.includes(file.mimetype)) {
+        const nameLooksHeic = HEIC_EXT_RE.test(file.originalname || '');
+        if (
+            ALLOWED_IMAGE_MIMES.includes(file.mimetype) ||
+            ALLOWED_VIDEO_MIMES.includes(file.mimetype) ||
+            HEIC_MIMES.includes(file.mimetype) ||
+            // Mot so trinh duyet/OS gui mimetype rong hoac application/octet-stream cho
+            // HEIC - chi tam chap nhan qua fileFilter dua vao extension, buffer se duoc
+            // sniff bang magic bytes (looksLikeHeicBuffer) trong route handler truoc khi
+            // thuc su tin day la HEIC. Khong noi long cho bat ky loai file nao khac.
+            ((file.mimetype === 'application/octet-stream' || !file.mimetype) && nameLooksHeic)
+        ) {
             cb(null, true);
         } else {
             cb(new Error('unsupported_mime'));
@@ -660,6 +705,37 @@ app.post('/api/messages/media', authRequired, approvedRequired, async (req, res,
     });
 }, async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'no_file' });
+
+    // STEP NEXT (HEIC fallback): client (heic2any) la duong chinh - da convert
+    // + nen san thanh JPEG truoc khi den day. Nhanh nay CHI chay khi client
+    // khong convert duoc (browser khong ho tro) va gui thang file HEIC goc len.
+    // Nhan dien bang magic bytes that su, khong tin mimetype/extension client gui.
+    const declaredHeic = HEIC_MIMES.includes(req.file.mimetype) || HEIC_EXT_RE.test(req.file.originalname || '');
+    if (declaredHeic || looksLikeHeicBuffer(req.file.buffer)) {
+        if (!looksLikeHeicBuffer(req.file.buffer)) {
+            // Duoi/mimetype noi la HEIC nhung magic bytes khong khop -> khong tin, reject.
+            return res.status(400).json({ error: 'invalid_file', message: 'File không đúng định dạng HEIC/HEIF.' });
+        }
+        try {
+            const jpegBuf = await convertHeicToJpeg(req.file.buffer);
+            if (jpegBuf.length > MAX_IMAGE_BYTES) {
+                return res.status(413).json({
+                    error: 'payload_too_large',
+                    message: 'Ảnh HEIC sau khi chuyển đổi vẫn vượt quá 500KB. Vui lòng thử ảnh khác hoặc dùng trình duyệt hỗ trợ chuyển đổi HEIC (Safari/Chrome bản mới).'
+                });
+            }
+            req.file.buffer = jpegBuf;
+            req.file.mimetype = 'image/jpeg';
+            req.file.size = jpegBuf.length;
+        } catch (err) {
+            console.error('Loi convert HEIC tren server:', err.message);
+            return res.status(400).json({
+                error: 'heic_conversion_failed',
+                message: 'Không thể chuyển đổi ảnh HEIC này. Vui lòng thử ảnh khác hoặc chụp/gửi lại ở định dạng JPEG.'
+            });
+        }
+    }
+
     const isImage = ALLOWED_IMAGE_MIMES.includes(req.file.mimetype);
     const isVideo = ALLOWED_VIDEO_MIMES.includes(req.file.mimetype);
     if (!isImage && !isVideo) return res.status(400).json({ error: 'invalid_mime' });
