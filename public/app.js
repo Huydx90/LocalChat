@@ -17,7 +17,7 @@ const state = {
   selectedFile: null,      // File/Blob da san sang de upload (anh da nen / video da kiem tra)
   unreadCount: 0,
   renderedIds: new Set(),
-  allowedReactions: ['👍', '❤️', '😂', '😮', '😢', '🙏'],
+  allowedReactions: ['👍', '❤️', '😂', '😮', '😢', '😡', '🎉'], // gia tri mac dinh truoc khi sync tu server (xem loadMessages)
   limits: { maxImageBytes: 512000, maxVideoBytes: 10485760 }, // se duoc dong bo lai tu server
 };
 
