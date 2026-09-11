@@ -7,29 +7,67 @@
 - Đăng ký tự do, nhưng tài khoản mới ở trạng thái **chờ duyệt** — chưa thấy được nội dung/chat.
 - **Admin duy nhất**: `do.huy` (mật khẩu mặc định `14503246`, tự seed khi khởi động lần đầu; nên đổi qua biến môi trường).
 - Admin duyệt (cấp quyền) user, thu hồi quyền, và **xóa** user.
-- Tin nhắn **không thể xóa/thu hồi** — không có endpoint xóa tin nhắn.
-- Gửi/xem **ảnh và video** (tối đa 15MB/file, giới hạn ở phía client + server).
-- Mỗi bong bóng chat có **nút copy nổi** (hiện khi hover/chạm).
+- Tin nhắn **không thể xóa/thu hồi** — không có endpoint xóa/sửa tin nhắn.
+- Gửi/xem **ảnh và video**, có giới hạn dung lượng (xem bên dưới).
+- Mỗi bong bóng chat có **nút copy nổi** và **nút thả cảm xúc** (👍 ❤️ 😂 😮 😢 🙏).
 - Tin nhắn mới **báo hiệu realtime** cho mọi client qua WebSocket (chấm đỏ + số chưa đọc trong app — **không** đẩy push notification ra hệ điều hành).
-- Tin nhắn **tự động bị xóa sau 2 ngày** (dọn dẹp mỗi giờ bằng cron nội bộ).
 - Hỗ trợ **tag @username** trong phòng chat (autocomplete khi gõ `@`).
-- **Thả cảm xúc** vào từng tin nhắn (👍 ❤️ 😂 😮 😢 🙏) — bấm nút 😊 nổi trên bong bóng để chọn, mỗi người chỉ giữ 1 cảm xúc/tin nhắn (bấm lại cùng emoji để gỡ). Đây không phải xóa/thu hồi tin nhắn, chỉ là gắn thêm cảm xúc, cập nhật realtime cho mọi người qua WebSocket.
-- **Mã hóa đầu-cuối (E2E)**: nội dung text/ảnh/video được mã hóa AES-GCM ngay trên trình duyệt bằng khóa suy ra từ một **mật khẩu phòng chat** do bạn tự đặt và chia sẻ ngoài hệ thống (ví dụ nói miệng, nhắn Zalo riêng...). Server **chỉ lưu ciphertext**, không có khả năng đọc nội dung.
+
+## Mô hình mã hóa (server-side, KHÔNG phải E2EE)
+
+```
+Client  --HTTPS/WSS (TLS)-->  Server  --AES-256-GCM-->  PostgreSQL
+```
+
+- Dữ liệu **truyền tải** (giữa trình duyệt và server) được bảo vệ bởi TLS (HTTPS/WSS) — bắt buộc chạy sau domain `https://` (Render tự cấp).
+- Dữ liệu **lưu trữ**: server mã hóa nội dung tin nhắn/ảnh/video bằng **AES-256-GCM** trước khi ghi vào PostgreSQL, dùng khóa `MESSAGE_ENCRYPTION_KEY` (biến môi trường, không hard-code, không commit). PostgreSQL **không bao giờ chứa plaintext**.
+- **Server có khả năng giải mã** nội dung (để phục vụ hiển thị, tìm @mention, v.v.) — đây là khác biệt quan trọng so với bản trước: **không còn là mã hóa đầu-cuối (E2EE)**. Nếu cần E2EE thật (server không đọc được), đó là một kiến trúc khác và cần STEP riêng.
+- `MESSAGE_ENCRYPTION_KEY` phải là chuỗi base64 giải mã ra đúng 32 byte. Tạo bằng:
+  ```bash
+  openssl rand -base64 32
+  ```
+  Nếu thiếu biến này khi `NODE_ENV=production`, server **từ chối khởi động** (fail fast) thay vì dùng khóa mặc định không an toàn.
+
+## Giới hạn media
+
+| Loại  | Giới hạn        | Xử lý |
+|-------|------------------|-------|
+| Ảnh   | ≤ 500 KB (512000 bytes) | Client tự resize/nén (giảm kích thước + chất lượng JPEG lặp lại) trước khi gửi; **server kiểm tra lại**, từ chối (413) nếu vượt |
+| Video | ≤ 10 MB (10485760 bytes) | Client chỉ kiểm tra dung lượng (không encode); **server kiểm tra lại**, từ chối (413) nếu vượt |
+
+Ảnh/video được truyền lên bằng `multipart/form-data` (không còn base64 trong JSON) để giảm overhead (~33%) và tránh phải giữ payload khổng lồ trong RAM. Khi hiển thị, client tải nội dung qua endpoint riêng `GET /api/messages/:id/media` (đã xác thực), server giải mã và trả về nhị phân trực tiếp.
+
+## Message retention (48h) + rolling/emergency cleanup + hard-block guard
+
+- **Bình thường**: tin nhắn tự động bị xóa sau `MESSAGE_RETENTION_HOURS` giờ (mặc định **48**). Chạy định kỳ mỗi 10 phút, xóa theo batch (`EMERGENCY_DELETE_BATCH_SIZE`, mặc định 500) để tránh transaction quá lớn.
+- **Rolling/emergency** (giống camera hành trình — vòng lặp dữ liệu): nếu dung lượng PostgreSQL vượt ngưỡng, server chủ động xóa **tin nhắn cũ nhất trước**, kể cả khi chưa đủ 48h, cho tới khi về vùng an toàn.
+  - `DB_WARNING_RATIO = 0.80` — bắt đầu cảnh báo.
+  - `DB_EMERGENCY_RATIO = 0.90` — bắt đầu xóa cũ-nhất-trước.
+  - `DB_TARGET_RATIO = 0.75` — mục tiêu sau khi dọn xong.
+  - Tính năng này **chỉ hoạt động nếu đặt `DB_STORAGE_LIMIT_MB`** (dung lượng **thực tế** của gói Postgres bạn đang dùng trên Render — kiểm tra trong Render dashboard, không đoán/mặc định 1024 MB). Lý do: PostgreSQL không có API/SQL portable để biết chính xác quota của Render, nên `usage_ratio = pg_database_size(...) / DB_STORAGE_LIMIT_MB` cần cấu hình thủ công.
+- **⚠️ Giới hạn thật của PostgreSQL cần biết**: `DELETE` **không** làm `pg_database_size()` giảm ngay lập tức — nó chỉ tạo dead tuples, dung lượng file trên đĩa chỉ thực sự giảm khi `VACUUM FULL`/`pg_repack` rewrite lại bảng (không chạy tự động ở đây vì cần khóa mạnh, block cả bảng). Vì vậy emergency cleanup có thể xóa rất nhiều tin nhắn mà tỷ lệ dung lượng gần như không giảm ngay — server **log trung thực** điều này (cảnh báo riêng) thay vì giả vờ đã "finished" thành công. Sau mỗi lần emergency cleanup, server chạy thêm `VACUUM (ANALYZE) messages` (an toàn, không phải `VACUUM FULL`, không khóa bảng) như một nỗ lực best-effort giúp Postgres tái sử dụng vùng trống — nhưng **đây không phải cam kết giảm dung lượng ngay**.
+- **Hard-block guard (lớp phòng thủ thứ hai, độc lập với cleanup)**: nếu sau khi cleanup mà dung lượng vẫn ở mức nguy hiểm, server **tạm từ chối nhận nội dung mới** thay vì để INSERT tiếp tục đẩy DB đến 100% rồi crash:
+  - `DB_HARD_BLOCK_MEDIA_RATIO = 0.95` — ảnh/video bị từ chối (503) trước.
+  - `DB_HARD_BLOCK_TEXT_RATIO = 0.99` — text bị từ chối muộn hơn nhiều (ưu tiên chat chữ vẫn hoạt động được lâu nhất có thể vì dung lượng rất nhỏ).
+  - Giá trị dung lượng được cache tối đa 30 giây (tránh query `pg_database_size()` mỗi request) và tự làm mới ngay sau khi có video mới được lưu.
+- Xóa dùng khóa đơn giản trong bộ nhớ (`cleanupRunning`) để tránh nhiều chu kỳ dọn dẹp chạy chồng nhau — đủ dùng vì Render Free chỉ chạy 1 instance.
+- `message_reactions` có `ON DELETE CASCADE` theo `messages.id` nên xóa tin nhắn không để lại reaction mồ côi.
 
 ## Cấu trúc
 
 ```
-server.js         # Express REST API + WebSocket + PostgreSQL
-public/index.html # Giao diện SPA (login/register/chat/admin)
-public/app.js      # Toàn bộ logic client + mã hóa E2E
-public/style.css   # Giao diện tối, tông teal/cyan
+server.js              # Express REST API + WebSocket + PostgreSQL + AES-256-GCM + retention
+migrations/             # Migration SQL đơn giản, tự chạy khi khởi động (bảng schema_migrations theo dõi)
+public/index.html       # Giao diện SPA (login/register/chat/admin)
+public/app.js            # Toàn bộ logic client: auth, nén ảnh, upload, hiển thị, reactions, admin
+public/style.css         # Giao diện tối, tông teal/cyan
 ```
 
 ## Chạy local
 
 ```bash
 npm install
-cp .env.example .env   # sửa DATABASE_URL trỏ tới Postgres local hoặc Render
+cp .env.example .env   # dien DATABASE_URL, MESSAGE_ENCRYPTION_KEY, v.v.
 npm start
 ```
 
@@ -37,25 +75,26 @@ Mở `http://localhost:3000`.
 
 ## Deploy lên Render.com
 
-1. **Đẩy code lên GitHub**: tạo repo mới, push toàn bộ thư mục này (đã có sẵn `.gitignore`).
-2. **Tạo PostgreSQL trên Render**: Dashboard → New → PostgreSQL. Sau khi tạo xong, copy **Internal Database URL**.
-3. **Tạo Web Service trên Render**: Dashboard → New → Web Service → kết nối repo GitHub vừa tạo.
+1. **Đẩy code lên GitHub**: push toàn bộ thư mục này (đã có `.gitignore`).
+2. **Tạo PostgreSQL trên Render**: Dashboard → New → PostgreSQL. Copy **Internal Database URL**. Ghi nhớ dung lượng gói (vd Free ~1GB) để điền `DB_STORAGE_LIMIT_MB`.
+3. **Tạo Web Service trên Render**: kết nối repo GitHub.
    - Build Command: `npm install`
    - Start Command: `npm start`
-4. Vào tab **Environment** của Web Service, thêm các biến:
-   - `DATABASE_URL` = Internal Database URL vừa copy ở bước 2
-   - `JWT_SECRET` = một chuỗi ngẫu nhiên dài, bí mật (bắt buộc cho production)
-   - `ADMIN_USERNAME` = `do.huy` (tùy chọn, đây là giá trị mặc định)
-   - `ADMIN_PASSWORD` = mật khẩu admin bạn muốn dùng (tùy chọn, mặc định `14503246`)
-5. Deploy. Render tự cấp biến `PORT`, server đã đọc `process.env.PORT`.
+4. Tab **Environment**, thêm:
+   - `DATABASE_URL` — Internal Database URL ở bước 2
+   - `JWT_SECRET` — chuỗi ngẫu nhiên dài, bí mật
+   - `MESSAGE_ENCRYPTION_KEY` — tạo bằng `openssl rand -base64 32` (**bắt buộc**, server không khởi động nếu thiếu khi production)
+   - `NODE_ENV=production`
+   - `ADMIN_USERNAME` / `ADMIN_PASSWORD` — tùy chọn, mặc định `do.huy` / `14503246`
+   - `DB_STORAGE_LIMIT_MB` — dung lượng gói Postgres (MB), để bật rolling cleanup
+   - (tùy chọn) `MESSAGE_RETENTION_HOURS`, `DB_WARNING_RATIO`, `DB_EMERGENCY_RATIO`, `DB_TARGET_RATIO`, `EMERGENCY_DELETE_BATCH_SIZE`, `MAX_IMAGE_BYTES`, `MAX_VIDEO_BYTES`
+5. Deploy. Render tự cấp `PORT`.
 6. Đăng nhập bằng tài khoản admin, đăng ký thử vài tài khoản khác để kiểm tra luồng duyệt.
-7. Tất cả người dùng trong công ty cần biết **mật khẩu mã hóa phòng chat** (nhập ở màn "Mã hóa đầu-cuối" sau khi đăng nhập lần đầu) — đây là bí mật chia sẻ riêng, không liên quan mật khẩu đăng nhập, và không được lưu ở server.
 
 ## Lưu ý quan trọng
 
-- **Đổi `ADMIN_PASSWORD` và `JWT_SECRET`** trên Render trước khi dùng thật; giá trị mặc định trong code chỉ để đúng yêu cầu ban đầu, không an toàn nếu để nguyên.
-- Gói Free của Render Postgres có giới hạn dung lượng/thời gian — phù hợp thử nghiệm nội bộ, cân nhắc gói trả phí nếu dùng lâu dài.
-- Vì tin nhắn/ảnh/video được mã hóa AES-GCM bằng "mật khẩu phòng chat" dùng chung, ai biết mật khẩu này đều đọc được toàn bộ nội dung — đây là mô hình E2E theo nhóm dùng khóa chia sẻ (không phải mã hóa theo từng cặp người dùng kiểu Signal). Nếu cần thu hồi quyền đọc lịch sử một cách triệt để, cần đổi mật khẩu phòng và thông báo lại cho các user còn hoạt động.
-- Trường `mentions` (danh sách username được @tag) được gửi dưới dạng metadata **không mã hóa** để phục vụ hiển thị/thông báo — bản thân nội dung tin nhắn vẫn được mã hóa đầy đủ.
-- Tương tự, **cảm xúc thả vào tin nhắn** (emoji + username người thả) cũng là metadata không mã hóa, lưu ở bảng `message_reactions` riêng, không đụng tới nội dung tin nhắn đã mã hóa.
-- File đính kèm giới hạn 15MB (do được mã hóa + encode base64 rồi gửi qua JSON); có thể tăng giới hạn trong `server.js` (`MAX_PAYLOAD_MB`) và `public/app.js` nếu cần, nhưng lưu ý gói Free của Render có giới hạn băng thông/bộ nhớ.
+- **Đổi `ADMIN_PASSWORD` và `JWT_SECRET`** trước khi dùng thật — server **từ chối khởi động** nếu thiếu `JWT_SECRET` hoặc `MESSAGE_ENCRYPTION_KEY` khi `NODE_ENV=production` (không còn fallback ngầm định).
+- **`MESSAGE_ENCRYPTION_KEY` phải được backup an toàn** — mất khóa này đồng nghĩa mất khả năng đọc mọi dữ liệu đã lưu (dù dữ liệu tự xóa sau 48h nên rủi ro thấp).
+- Nâng cấp từ bản E2EE trước đó: migration `001_server_side_encryption_media.sql` sẽ **xóa sạch tin nhắn cũ** (vì ciphertext cũ mã hóa bằng passphrase phía client, server không có cách nào giải mã lại trong mô hình mới) rồi đổi cột `ciphertext`/`iv` sang `BYTEA`. Đây là hành động một lần, không thể hoàn tác.
+- Trường `mentions` và **cảm xúc thả vào tin nhắn** là metadata lưu riêng (không phải nội dung mã hóa), phục vụ hiển thị/tra cứu.
+- Gói Free của Render Postgres có giới hạn dung lượng/thời gian — đặt đúng `DB_STORAGE_LIMIT_MB` để rolling cleanup bảo vệ database khỏi đầy.
