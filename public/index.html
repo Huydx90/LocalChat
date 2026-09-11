@@ -71,10 +71,12 @@
   <button id="btn-load-more" class="btn-loadmore hidden">Tải tin nhắn cũ hơn</button>
 
   <div id="mention-dropdown" class="mention-dropdown hidden"></div>
+  <div id="emoji-picker" class="emoji-picker hidden"></div>
 
   <form id="form-send" class="composer">
+    <button type="button" id="btn-emoji" class="btn-icon" title="Gửi cảm xúc">😊</button>
     <button type="button" id="btn-attach" class="btn-icon" title="Gửi ảnh/video">📎</button>
-    <input type="file" id="file-input" accept="image/*,video/*" class="hidden">
+    <input type="file" id="file-input" accept="image/*,video/*,.heic,.heif" class="hidden">
     <input type="text" id="text-input" placeholder="Nhập tin nhắn... (dùng @ để tag)" autocomplete="off">
     <button type="submit" class="btn-primary btn-send">Gửi</button>
   </form>
@@ -97,6 +99,10 @@
 
 <div id="toast" class="toast hidden"></div>
 
+<!-- HEIC/HEIF -> JPEG o phia client (uu tien - xem app.js prepareImageForUpload()).
+     Neu CDN khong tai duoc (offline/chan mang), app.js tu phat hien window.heic2any
+     khong ton tai va rot xuong gui HEIC goc len server de server tu convert. -->
+<script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

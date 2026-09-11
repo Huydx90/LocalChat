@@ -147,6 +147,35 @@ input:focus{ outline:none; border-color: var(--teal); }
 }
 .reaction-picker-opt:hover{ transform: scale(1.25); }
 
+/* ---------- emotion (emoji picker) ---------- */
+.bubble-emoji-only{
+  background:transparent !important; border:none !important; padding:2px 4px !important;
+  font-size:2.4rem; line-height:1.1;
+}
+.emoji-picker{
+  position:sticky; bottom:56px; margin:0 12px 6px; background: var(--bg-elev);
+  border:1px solid var(--border); border-radius:14px; box-shadow:0 10px 24px rgba(0,0,0,.4);
+  z-index:9; overflow:hidden; max-height:260px; display:flex; flex-direction:column;
+}
+.emoji-tabs{
+  display:flex; gap:2px; padding:6px; border-bottom:1px solid var(--border);
+  overflow-x:auto; flex:0 0 auto;
+}
+.emoji-tab{
+  background:transparent; border:none; font-size:1.15rem; padding:4px 8px; border-radius:8px;
+  cursor:pointer; flex:0 0 auto; opacity:.55;
+}
+.emoji-tab.active{ opacity:1; background: var(--bg-panel); }
+.emoji-grid{
+  display:grid; grid-template-columns:repeat(auto-fill, minmax(34px, 1fr));
+  gap:2px; padding:8px; overflow-y:auto;
+}
+.emoji-opt{
+  background:transparent; border:none; font-size:1.3rem; padding:4px; border-radius:8px;
+  cursor:pointer; transition: transform .1s, background .1s;
+}
+.emoji-opt:hover{ background: var(--bg-panel); transform: scale(1.2); }
+
 /* ---------- composer ---------- */
 .composer{
   display:flex; align-items:center; gap:8px; padding:10px 12px;

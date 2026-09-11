@@ -315,6 +315,7 @@ async function buildBubble(m) {
   if (m.msg_type === 'text') {
     plainTextForCopy = m.text != null ? m.text : '';
     bubble.innerHTML = renderMentions(escapeHtml(plainTextForCopy), m.mentions);
+    if (isEmojiOnlyMessage(plainTextForCopy)) bubble.classList.add('bubble-emoji-only');
   } else if (m.msg_type === 'image') {
     const img = el('img'); img.alt = 'Ảnh đính kèm'; img.loading = 'lazy';
     bubble.appendChild(img);
@@ -428,9 +429,130 @@ const fileInput = $('#file-input');
 
 $('#btn-attach').addEventListener('click', () => fileInput.click());
 
+/* -------------------------- Emotion (emoji picker) ------------------------ */
+// STEP NEXT (Emotion): gui emoji nhu 1 text message BINH THUONG - di qua dung
+// pipeline encrypt/retention/WebSocket hien co, khong tao bang/API rieng.
+const EMOJI_CATEGORIES = [
+  { name: 'Mặt cười', list: ['😀','😃','😄','😁','😆','😅','😂','🤣','😊','😇','🙂','🙃','😉','😌','😍','🥰','😘','😗','😙','😚','😋','😛','😝','😜','🤪','🤨','🧐','🤓','😎','🤩','🥳','😐','😑','😔','🙁','😢','😭','😡','🤬','😱','😨','😰','😥','🥺','🤔','🙄','😴','🤒','🤕'] },
+  { name: 'Người', list: ['👋','🤚','🖐️','✋','👌','🤞','✌️','🤟','🤘','👍','👎','👊','✊','🙏','👏','🙌','💪','👶','🧑','👨','👩','🧓','👴','👵','🙋','🤷','🙆','🙅'] },
+  { name: 'Động vật', list: ['🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🐔','🐧','🐦','🦆','🦉','🐺','🐗','🐴','🦄','🐝','🐛','🦋','🐌','🐢','🐍','🐙','🐳','🐬','🐠','🐟'] },
+  { name: 'Đồ ăn', list: ['🍏','🍎','🍊','🍋','🍌','🍉','🍇','🍓','🍈','🍒','🍑','🥭','🍍','🥥','🥝','🍅','🍆','🥑','🥦','🌽','🍞','🥐','🍕','🍔','🍟','🌭','🍿','🍣','🍦','🍩','🍪','🎂','☕','🍺'] },
+  { name: 'Hoạt động', list: ['⚽','🏀','🏈','⚾','🎾','🏐','🏉','🎱','🏓','🏸','🥊','🎮','🎲','🎯','🎳','🎸','🎤','🎧','🎨','🚴','🏃','🏆','🥇','🎉','🎊'] },
+  { name: 'Đồ vật', list: ['⌚','📱','💻','⌨️','🖥️','🖨️','📷','📹','☎️','📺','⏰','💡','🔦','🔋','🔌','🧰','🔧','🔨','📦','✉️','📌','📎','✂️','🔑','🚗','✈️'] },
+  { name: 'Biểu tượng', list: ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','💔','💯','🔥','✨','⭐','✅','❌','⚠️','❓','❗','💤','💬','💭'] },
+];
+
+let emojiPickerOpen = false;
+function buildEmojiPicker() {
+  const box = $('#emoji-picker');
+  box.innerHTML = '';
+  const tabs = el('div', 'emoji-tabs');
+  const grid = el('div', 'emoji-grid');
+  function renderCategory(idx) {
+    grid.innerHTML = '';
+    EMOJI_CATEGORIES[idx].list.forEach(emoji => {
+      const opt = el('button', 'emoji-opt', emoji);
+      opt.type = 'button';
+      opt.addEventListener('click', () => sendEmotionMessage(emoji));
+      grid.appendChild(opt);
+    });
+    tabs.querySelectorAll('.emoji-tab').forEach((t, i) => t.classList.toggle('active', i === idx));
+  }
+  EMOJI_CATEGORIES.forEach((cat, idx) => {
+    const tab = el('button', `emoji-tab${idx === 0 ? ' active' : ''}`, cat.list[0]);
+    tab.type = 'button';
+    tab.title = cat.name;
+    tab.addEventListener('click', () => renderCategory(idx));
+    tabs.appendChild(tab);
+  });
+  box.appendChild(tabs);
+  box.appendChild(grid);
+  renderCategory(0);
+}
+function openEmojiPicker() {
+  if (emojiPickerOpen) return;
+  buildEmojiPicker();
+  $('#emoji-picker').classList.remove('hidden');
+  emojiPickerOpen = true;
+  setTimeout(() => document.addEventListener('click', closeEmojiPickerOnOutsideClick), 0);
+}
+function closeEmojiPicker() {
+  $('#emoji-picker').classList.add('hidden');
+  $('#emoji-picker').innerHTML = '';
+  emojiPickerOpen = false;
+  document.removeEventListener('click', closeEmojiPickerOnOutsideClick);
+}
+function closeEmojiPickerOnOutsideClick(e) {
+  if (e.target.closest('#emoji-picker') || e.target.closest('#btn-emoji')) return;
+  closeEmojiPicker();
+}
+$('#btn-emoji').addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (emojiPickerOpen) closeEmojiPicker(); else openEmojiPicker();
+});
+
+// Gui 1 emoji NGAY LAP TUC nhu mot text message binh thuong (khong tao media,
+// khong API rieng) - retention 48h/encryption/WebSocket hien co tu ap dung.
+async function sendEmotionMessage(emoji) {
+  closeEmojiPicker();
+  try {
+    const res = await api('/api/messages', { method: 'POST', body: { text: emoji } });
+    if (res && res.message) await appendMessage(res.message, true);
+  } catch (err) {
+    showToast('Gửi cảm xúc thất bại.');
+  }
+}
+
+// Nhan dien tin nhan CHI gom 1-3 emoji (khong co text khac) de render lon hon,
+// giong spec: "Nếu message chỉ chứa 1–3 emoji và không có text -> render lớn hơn".
+const EMOJI_CLUSTER_RE = /\p{Extended_Pictographic}/u;
+function isEmojiOnlyMessage(text) {
+  if (!text) return false;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+    try {
+      const seg = new Intl.Segmenter('vi', { granularity: 'grapheme' });
+      const clusters = Array.from(seg.segment(trimmed), s => s.segment);
+      if (clusters.length < 1 || clusters.length > 3) return false;
+      return clusters.every(c => EMOJI_CLUSTER_RE.test(c));
+    } catch { /* fall through */ }
+  }
+  return /^(?:\p{Extended_Pictographic}\uFE0F?\u200D?){1,3}$/u.test(trimmed);
+}
+
+// HEIC/HEIF: nhieu iPhone/OS gan mimetype rong hoac generic cho HEIC, nen kiem
+// tra ca mimetype LAN extension.
+const HEIC_MIMES = ['image/heic', 'image/heif'];
+function isHeicFile(f) {
+  return HEIC_MIMES.includes(f.type) || /\.(heic|heif)$/i.test(f.name || '');
+}
+
 fileInput.addEventListener('change', async () => {
   const f = fileInput.files[0];
   if (!f) return;
+
+  if (isHeicFile(f)) {
+    showToast('Đang chuyển đổi ảnh HEIC...');
+    try {
+      const jpegFile = await convertHeicClientSide(f);
+      // Sau khi co JPEG, di qua dung pipeline nen/resize hien tai nhu anh thuong.
+      const compact = await prepareImageForUpload(jpegFile);
+      state.selectedFile = compact;
+      $('#upload-preview-name').textContent = `📎 ${compact.name} (${Math.ceil(compact.size / 1024)}KB)`;
+      $('#upload-preview').classList.remove('hidden');
+      showToast(`Ảnh HEIC đã chuyển đổi, còn ${Math.ceil(compact.size / 1024)} KB`);
+    } catch (err) {
+      // Trinh duyet khong tu convert duoc HEIC (thieu heic2any hoac giai ma that
+      // bai) -> gui thang file HEIC goc len, de server tu convert (fallback).
+      console.warn('Client khong convert duoc HEIC, chuyen sang server fallback:', err.message);
+      showToast('Trình duyệt không tự chuyển đổi được HEIC, đang gửi để máy chủ xử lý...');
+      state.selectedFile = f;
+      $('#upload-preview-name').textContent = `📎 ${f.name} (${Math.ceil(f.size / 1024)}KB, HEIC)`;
+      $('#upload-preview').classList.remove('hidden');
+    }
+    return;
+  }
 
   if (/^image\//.test(f.type)) {
     if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(f.type)) {
@@ -467,6 +589,21 @@ $('#btn-cancel-upload').addEventListener('click', () => {
   state.selectedFile = null; fileInput.value = '';
   $('#upload-preview').classList.add('hidden');
 });
+
+/* ---- HEIC/HEIF -> JPEG (client-side, uu tien) - dung thu vien heic2any tai
+   tu CDN trong index.html. Neu thu vien khong ton tai (chan mang) hoac giai
+   ma that bai (file loi, browser khong ho tro decode HEIC), nem loi de noi
+   goi (fileInput handler) rot xuong phuong an gui HEIC goc len server. ---- */
+async function convertHeicClientSide(file) {
+  if (typeof window.heic2any !== 'function') {
+    throw new Error('heic2any_unavailable');
+  }
+  const result = await window.heic2any({ blob: file, toType: 'image/jpeg', quality: 0.85 });
+  // heic2any co the tra ve 1 Blob hoac mang Blob (anh HEIC nhieu frame/live photo) -
+  // ta chi can frame dau tien cho chat.
+  const blob = Array.isArray(result) ? result[0] : result;
+  return blobToFile(blob, file.name);
+}
 
 /* ---- Nen anh phia client: resize + giam quality lap lai cho toi khi <=500KB ---- */
 async function loadImageBitmap(file) {
