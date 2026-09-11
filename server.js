@@ -1080,13 +1080,32 @@ wss.on('connection', (ws, req) => {
     const token = url.searchParams.get('token');
     const payload = token ? verifyWsToken(token) : null;
     if (!payload) {
+        console.warn(`[WS] Tu choi ket noi - token khong hop le/het han (co token: ${!!token})`);
         ws.close(4001, 'unauthorized');
         return;
     }
+    console.log(`[WS] Ket noi thanh cong: user=${payload.username} role=${payload.role}`);
     ws.userPayload = payload;
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
-    ws.on('close', () => {});
+    ws.on('close', (code, reason) => {
+        console.log(`[WS] Dong ket noi: user=${payload.username} code=${code} reason=${reason}`);
+    });
+    ws.on('error', (err) => {
+        console.error(`[WS] Loi ket noi: user=${payload.username}`, err.message);
+    });
+});
+
+// STEP DEBUG (tam thoi de chan doan WS "failed" tren Render): log moi lan HTTP
+// server nhan duoc yeu cau UPGRADE (buoc bat tay dau tien cua WebSocket, TRUOC
+// khi toi duoc wss.on('connection') o tren). Neu KHONG thay dong nay xuat hien
+// khi client bao "WebSocket connection ... failed", nghia la request khong toi
+// duoc tien trinh Node nay - loi nam o tang ngoai (proxy/Render/trinh duyet/
+// extension), khong phai logic server. Neu THAY dong nay nhung sau do khong
+// thay "[WS] Ket noi thanh cong" / "[WS] Tu choi ket noi", loi nam trong buoc
+// xu ly upgrade cua thu vien ws.
+server.on('upgrade', (req) => {
+    console.log(`[WS] Nhan duoc yeu cau upgrade: ${req.url}`);
 });
 
 setInterval(() => {
