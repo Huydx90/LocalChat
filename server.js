@@ -94,7 +94,9 @@ const ALLOWED_VIDEO_MIMES = ['video/mp4', 'video/webm', 'video/quicktime', 'vide
 const HEIC_MIMES = ['image/heic', 'image/heif'];
 const HEIC_EXT_RE = /\.(heic|heif)$/i;
 
-const ALLOWED_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+// STEP NEXT: whitelist dung DUNG danh sach da chot trong spec (👍 ❤️ 😂 😮 😢 😡 🎉).
+// KHONG cho arbitrary string - route /api/messages/:id/react kiem tra .includes(emoji).
+const ALLOWED_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '😡', '🎉'];
 
 
 // ===================================================================
