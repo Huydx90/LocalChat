@@ -2,26 +2,23 @@
 
 /* =========================================================================
  * Chat noi bo - app.js
- * - Auth (JWT trong localStorage)
- * - Ma hoa dau-cuoi AES-GCM: khoa duoc suy ra tu "mat khau phong chat"
- *   (passphrase) ma NGUOI DUNG tu nhap, KHONG BAO GIO gui len server.
- *   Server chi luu/chuyen tiep ciphertext.
- * - WebSocket de nhan tin nhan moi + thay doi trang thai tai khoan realtime.
+ * MO HINH MA HOA (STEP nay): server ma hoa/giai ma bang AES-256-GCM, KHONG
+ * con la E2EE. Du lieu truyen tai duoc bao ve boi HTTPS/WSS (TLS). Client chi
+ * gui plaintext qua ket noi da ma hoa TLS toi server; server luu ciphertext.
  * ========================================================================= */
 
 const state = {
   token: localStorage.getItem('chat_token') || null,
   user: null,
-  roomKey: null,          // CryptoKey (AES-GCM) suy ra tu passphrase
   ws: null,
   wsReconnectTimer: null,
-  userList: [],           // danh sach username da duyet (cho @tag)
+  userList: [],
   oldestId: null,
-  selectedFile: null,
+  selectedFile: null,      // File/Blob da san sang de upload (anh da nen / video da kiem tra)
   unreadCount: 0,
-  mentionQuery: null,     // vi tri dang go @xxx trong o nhap
-  renderedIds: new Set(), // chong render trung khi vua optimistic-render vua nhan lai qua WS
+  renderedIds: new Set(),
   allowedReactions: ['👍', '❤️', '😂', '😮', '😢', '🙏'],
+  limits: { maxImageBytes: 512000, maxVideoBytes: 10485760 }, // se duoc dong bo lai tu server
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -37,16 +34,15 @@ function showView(id) {
   document.querySelectorAll('.view').forEach(v => v.classList.add('hidden'));
   $(id).classList.remove('hidden');
 }
-
 function showToast(msg) {
   const t = $('#toast');
   t.textContent = msg;
   t.classList.remove('hidden');
   clearTimeout(showToast._timer);
-  showToast._timer = setTimeout(() => t.classList.add('hidden'), 1800);
+  showToast._timer = setTimeout(() => t.classList.add('hidden'), 2200);
 }
 
-/* ------------------------------- API helper ------------------------------ */
+/* ------------------------------- API helpers ------------------------------ */
 async function api(path, opts = {}) {
   const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
   if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
@@ -57,73 +53,35 @@ async function api(path, opts = {}) {
   });
   let data = {};
   try { data = await res.json(); } catch {}
-  if (res.status === 401) {
-    logout(false);
-    throw new Error('unauthorized');
-  }
+  if (res.status === 401) { logout(false); throw new Error('unauthorized'); }
   if (!res.ok) {
     const err = new Error(data.message || data.error || 'request_failed');
-    err.data = data;
-    err.status = res.status;
+    err.data = data; err.status = res.status;
     throw err;
   }
   return data;
 }
 
-/* ============================== E2E CRYPTO =============================== */
-// Salt co dinh, KHONG bi mat (do khong mang tinh bao mat trong PBKDF2 - tinh
-// bao mat den tu passphrase). Doi salt nay se lam mat kha nang giai ma tin cu.
-const KDF_SALT = new TextEncoder().encode('noibo-chat-e2e-salt-v1');
-
-function b64FromBuf(buf) {
-  let binary = '';
-  const bytes = new Uint8Array(buf);
-  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
-}
-function bufFromB64(b64) {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
-}
-
-async function deriveRoomKey(passphrase) {
-  const baseKey = await crypto.subtle.importKey(
-    'raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']
-  );
-  return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt: KDF_SALT, iterations: 150000, hash: 'SHA-256' },
-    baseKey,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt', 'decrypt']
-  );
-}
-
-async function encryptBytes(key, arrayBuffer) {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, arrayBuffer);
-  return { iv: b64FromBuf(iv), ciphertext: b64FromBuf(ct) };
-}
-async function decryptBytes(key, ivB64, ctB64) {
-  const iv = new Uint8Array(bufFromB64(ivB64));
-  const ct = bufFromB64(ctB64);
-  return crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct); // throws if sai passphrase
-}
-async function encryptText(key, text) {
-  return encryptBytes(key, new TextEncoder().encode(text));
-}
-async function decryptText(key, ivB64, ctB64) {
-  const buf = await decryptBytes(key, ivB64, ctB64);
-  return new TextDecoder().decode(buf);
+// Upload multipart (anh/video) - KHONG dung JSON/base64 de tranh phinh payload + RAM.
+async function apiUpload(path, file) {
+  const form = new FormData();
+  form.append('file', file, file.name || 'upload');
+  const headers = {};
+  if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+  const res = await fetch(path, { method: 'POST', headers, body: form });
+  let data = {};
+  try { data = await res.json(); } catch {}
+  if (res.status === 401) { logout(false); throw new Error('unauthorized'); }
+  if (!res.ok) {
+    const err = new Error(data.message || data.error || 'upload_failed');
+    err.data = data; err.status = res.status;
+    throw err;
+  }
+  return data;
 }
 
 /* ================================= AUTH ================================= */
-function persistToken(token) {
-  state.token = token;
-  localStorage.setItem('chat_token', token);
-}
+function persistToken(token) { state.token = token; localStorage.setItem('chat_token', token); }
 
 async function bootstrap() {
   if (!state.token) { showView('#view-auth'); return; }
@@ -143,25 +101,17 @@ function routeByStatus() {
     showView('#view-pending');
     return;
   }
-  const savedPass = sessionStorage.getItem('chat_passphrase');
-  if (savedPass) {
-    deriveRoomKey(savedPass).then((key) => { state.roomKey = key; enterChat(); });
-  } else {
-    showView('#view-passphrase');
-  }
+  enterChat();
 }
 
 function logout(closeSocket = true) {
   state.token = null;
   state.user = null;
-  state.roomKey = null;
   localStorage.removeItem('chat_token');
-  sessionStorage.removeItem('chat_passphrase');
   if (closeSocket && state.ws) { try { state.ws.close(); } catch {} }
   showView('#view-auth');
 }
 
-/* -------- Login form -------- */
 $('#form-login').addEventListener('submit', async (e) => {
   e.preventDefault();
   $('#login-error').textContent = '';
@@ -178,7 +128,6 @@ $('#form-login').addEventListener('submit', async (e) => {
   }
 });
 
-/* -------- Register form -------- */
 $('#form-register').addEventListener('submit', async (e) => {
   e.preventDefault();
   $('#register-error').textContent = '';
@@ -207,16 +156,6 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 
 $('#btn-pending-refresh').addEventListener('click', bootstrap);
 $('#btn-pending-logout').addEventListener('click', () => logout());
-
-$('#btn-passphrase-continue').addEventListener('click', async () => {
-  const pass = $('#passphrase-input').value;
-  if (!pass) return;
-  sessionStorage.setItem('chat_passphrase', pass);
-  state.roomKey = await deriveRoomKey(pass);
-  $('#passphrase-input').value = '';
-  enterChat();
-});
-
 $('#btn-logout').addEventListener('click', () => logout());
 
 /* ============================== CHAT ENTRY =============================== */
@@ -242,9 +181,7 @@ function connectWebSocket() {
 
     if (msg.type === 'new_message') {
       await appendMessage(msg.message, true);
-      if (msg.message.sender !== state.user.username && !isChatFocused()) {
-        bumpUnread();
-      }
+      if (msg.message.sender !== state.user.username && !isChatFocused()) bumpUnread();
     } else if (msg.type === 'status_changed') {
       if (msg.status === 'approved') {
         showToast('Tài khoản của bạn đã được duyệt!');
@@ -267,7 +204,7 @@ function connectWebSocket() {
   };
 
   ws.onclose = (evt) => {
-    if (evt.code === 4001 || evt.code === 4002) return; // unauthorized / bi xoa - khong tu reconnect
+    if (evt.code === 4001 || evt.code === 4002) return;
     clearTimeout(state.wsReconnectTimer);
     state.wsReconnectTimer = setTimeout(() => { if (state.token) connectWebSocket(); }, 3000);
   };
@@ -322,13 +259,14 @@ function renderMentions(escapedText, mentions) {
   return out;
 }
 
-async function loadMessages(initial) {
+async function loadMessages() {
   try {
     const data = await api('/api/messages?limit=50');
-    if (Array.isArray(data.allowedReactions) && data.allowedReactions.length) {
-      state.allowedReactions = data.allowedReactions;
-    }
+    if (Array.isArray(data.allowedReactions) && data.allowedReactions.length) state.allowedReactions = data.allowedReactions;
+    if (data.maxImageBytes) state.limits.maxImageBytes = data.maxImageBytes;
+    if (data.maxVideoBytes) state.limits.maxVideoBytes = data.maxVideoBytes;
     $('#messages').innerHTML = '';
+    state.renderedIds.clear();
     for (const m of data.messages) await appendMessage(m, false);
     if (data.messages.length > 0) state.oldestId = data.messages[0].id;
     $('#btn-load-more').classList.toggle('hidden', data.messages.length < 50);
@@ -354,13 +292,10 @@ $('#btn-load-more').addEventListener('click', async () => {
   box.scrollTop = box.scrollHeight - prevHeight;
 });
 
-function scrollToBottom() {
-  const box = $('#messages');
-  box.scrollTop = box.scrollHeight;
-}
+function scrollToBottom() { const box = $('#messages'); box.scrollTop = box.scrollHeight; }
 
 async function appendMessage(m, autoscroll) {
-  if (m.id && state.renderedIds.has(m.id)) return; // da render roi (vd: vua optimistic-render luc gui)
+  if (m.id && state.renderedIds.has(m.id)) return;
   if (m.id) state.renderedIds.add(m.id);
   const box = $('#messages');
   const wasAtBottom = isScrolledToBottom();
@@ -377,42 +312,30 @@ async function buildBubble(m) {
   const bubble = el('div', 'bubble');
 
   let plainTextForCopy = null;
-
-  try {
-    if (m.msg_type === 'text') {
-      const text = await decryptText(state.roomKey, m.iv, m.ciphertext);
-      plainTextForCopy = text;
-      bubble.innerHTML = renderMentions(escapeHtml(text), m.mentions);
-    } else {
-      const buf = await decryptBytes(state.roomKey, m.iv, m.ciphertext);
-      const blob = new Blob([buf], { type: m.mime_type || 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-      if (m.msg_type === 'image') {
-        const img = el('img'); img.src = url; img.loading = 'lazy';
-        bubble.appendChild(img);
-      } else {
-        const vid = el('video'); vid.src = url; vid.controls = true;
-        bubble.appendChild(vid);
-      }
-    }
-  } catch (err) {
-    bubble.innerHTML = '';
-    bubble.appendChild(el('span', 'bubble-media-fail', '🔒 Không giải mã được (kiểm tra mật khẩu phòng chat)'));
+  if (m.msg_type === 'text') {
+    plainTextForCopy = m.text != null ? m.text : '';
+    bubble.innerHTML = renderMentions(escapeHtml(plainTextForCopy), m.mentions);
+  } else if (m.msg_type === 'image') {
+    const img = el('img'); img.alt = 'Ảnh đính kèm'; img.loading = 'lazy';
+    bubble.appendChild(img);
+    loadMediaInto(img, m.id);
+  } else if (m.msg_type === 'video') {
+    const vid = el('video'); vid.controls = true;
+    bubble.appendChild(vid);
+    loadMediaInto(vid, m.id);
   }
 
   const btnRow = el('div', 'bubble-btn-row');
   if (plainTextForCopy !== null) {
     const copyBtn = el('button', 'bubble-copy', '⧉');
-    copyBtn.type = 'button';
-    copyBtn.title = 'Copy';
+    copyBtn.type = 'button'; copyBtn.title = 'Copy';
     copyBtn.addEventListener('click', () => {
       navigator.clipboard.writeText(plainTextForCopy).then(() => showToast('Đã copy'));
     });
     btnRow.appendChild(copyBtn);
   }
   const reactBtn = el('button', 'bubble-react-trigger', '😊');
-  reactBtn.type = 'button';
-  reactBtn.title = 'Thả cảm xúc';
+  reactBtn.type = 'button'; reactBtn.title = 'Thả cảm xúc';
   reactBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleReactionPicker(row, m.id); });
   btnRow.appendChild(reactBtn);
   bubble.appendChild(btnRow);
@@ -423,16 +346,31 @@ async function buildBubble(m) {
   return row;
 }
 
+// Tai noi dung anh/video qua endpoint rieng (server giai ma AES-256-GCM roi tra ve).
+// Dung fetch + Authorization header (khong nhet token vao URL) roi tao blob URL.
+async function loadMediaInto(mediaEl, messageId) {
+  try {
+    const res = await fetch(`/api/messages/${messageId}/media`, {
+      headers: { Authorization: 'Bearer ' + state.token }
+    });
+    if (!res.ok) throw new Error('fetch_failed');
+    const blob = await res.blob();
+    mediaEl.src = URL.createObjectURL(blob);
+  } catch (err) {
+    const fail = el('span', 'bubble-media-fail', '⚠️ Không tải được file này.');
+    mediaEl.replaceWith(fail);
+  }
+}
+
 /* -------------------------------- Reactions ------------------------------- */
 function buildReactionsBar(reactions) {
   const bar = el('div', 'reactions-bar');
   renderReactionsInto(bar, reactions);
   return bar;
 }
-
 function renderReactionsInto(bar, reactions) {
   bar.innerHTML = '';
-  const counts = {}; // emoji -> { count, mine }
+  const counts = {};
   reactions.forEach(r => {
     if (!counts[r.emoji]) counts[r.emoji] = { count: 0, mine: false };
     counts[r.emoji].count++;
@@ -448,14 +386,12 @@ function renderReactionsInto(bar, reactions) {
     bar.appendChild(pill);
   });
 }
-
 function updateReactionsUI(messageId, reactions) {
   const row = document.querySelector(`.bubble-row[data-message-id="${messageId}"]`);
   if (!row) return;
   const bar = row.querySelector('.reactions-bar');
   if (bar) renderReactionsInto(bar, reactions);
 }
-
 let activePickerRow = null;
 function toggleReactionPicker(row, messageId) {
   closeReactionPicker();
@@ -491,62 +427,133 @@ const textInput = $('#text-input');
 const fileInput = $('#file-input');
 
 $('#btn-attach').addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', () => {
+
+fileInput.addEventListener('change', async () => {
   const f = fileInput.files[0];
   if (!f) return;
-  if (!/^image\/|^video\//.test(f.type)) { showToast('Chỉ hỗ trợ ảnh hoặc video.'); fileInput.value = ''; return; }
-  if (f.size > 15 * 1024 * 1024) { showToast('File tối đa 15MB.'); fileInput.value = ''; return; }
-  state.selectedFile = f;
-  $('#upload-preview-name').textContent = `📎 ${f.name} (${(f.size / 1024 / 1024).toFixed(1)}MB)`;
-  $('#upload-preview').classList.remove('hidden');
+
+  if (/^image\//.test(f.type)) {
+    if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(f.type)) {
+      showToast('Định dạng ảnh không được hỗ trợ.'); fileInput.value = ''; return;
+    }
+    showToast('Ảnh đang được nén...');
+    try {
+      const compact = await prepareImageForUpload(f);
+      state.selectedFile = compact;
+      $('#upload-preview-name').textContent = `📎 ${compact.name} (${Math.ceil(compact.size / 1024)}KB)`;
+      $('#upload-preview').classList.remove('hidden');
+      showToast(`Ảnh đã được nén còn ${Math.ceil(compact.size / 1024)} KB`);
+    } catch (err) {
+      showToast(err.message || 'Ảnh quá lớn, không thể nén xuống dưới 500 KB.');
+      fileInput.value = '';
+    }
+  } else if (/^video\//.test(f.type)) {
+    if (!['video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska'].includes(f.type)) {
+      showToast('Định dạng video không được hỗ trợ.'); fileInput.value = ''; return;
+    }
+    if (f.size > state.limits.maxVideoBytes) {
+      showToast('Video phải có dung lượng không quá 10 MB.');
+      fileInput.value = ''; return;
+    }
+    state.selectedFile = f;
+    $('#upload-preview-name').textContent = `📎 ${f.name} (${(f.size / 1024 / 1024).toFixed(1)}MB)`;
+    $('#upload-preview').classList.remove('hidden');
+  } else {
+    showToast('Chỉ hỗ trợ ảnh hoặc video.'); fileInput.value = '';
+  }
 });
+
 $('#btn-cancel-upload').addEventListener('click', () => {
   state.selectedFile = null; fileInput.value = '';
   $('#upload-preview').classList.add('hidden');
 });
 
+/* ---- Nen anh phia client: resize + giam quality lap lai cho toi khi <=500KB ---- */
+async function loadImageBitmap(file) {
+  if (window.createImageBitmap) {
+    try { return await createImageBitmap(file); } catch { /* fall through to <img> */ }
+  }
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Không đọc được ảnh.'));
+    img.src = URL.createObjectURL(file);
+  });
+}
+function canvasToBlob(source, width, height, quality) {
+  return new Promise((resolve, reject) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = width; canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(source, 0, 0, width, height);
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('Không nén được ảnh.')), 'image/jpeg', quality);
+  });
+}
+function blobToFile(blob, originalName) {
+  const base = (originalName || 'image').replace(/\.[^./]+$/, '');
+  return new File([blob], `${base}.jpg`, { type: 'image/jpeg' });
+}
+
+async function prepareImageForUpload(file) {
+  const TARGET = state.limits.maxImageBytes;
+  // Da du nho va dung dinh dang pho bien -> khong can nen lai, gui thang
+  if (file.size <= TARGET && ['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+    return file;
+  }
+  const source = await loadImageBitmap(file);
+  let width = source.width || source.naturalWidth;
+  let height = source.height || source.naturalHeight;
+  const MAX_DIMENSION = 1600;
+  if (Math.max(width, height) > MAX_DIMENSION) {
+    const scale = MAX_DIMENSION / Math.max(width, height);
+    width = Math.round(width * scale);
+    height = Math.round(height * scale);
+  }
+
+  const MAX_ATTEMPTS = 10;
+  const MIN_DIMENSION = 240;
+  let quality = 0.82;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const blob = await canvasToBlob(source, width, height, quality);
+    if (blob.size <= TARGET) return blobToFile(blob, file.name);
+    if (quality > 0.35) {
+      quality -= 0.12; // giam quality truoc
+    } else if (width > MIN_DIMENSION && height > MIN_DIMENSION) {
+      width = Math.round(width * 0.82); // het co giam quality thi giam kich thuoc
+      height = Math.round(height * 0.82);
+      quality = 0.6;
+    } else {
+      break; // da cham gioi han toi thieu hop ly, dung lai
+    }
+  }
+  throw new Error('Ảnh quá lớn, không thể nén xuống dưới 500 KB.');
+}
+
 $('#form-send').addEventListener('submit', async (e) => {
   e.preventDefault();
   const sendBtn = document.querySelector('.btn-send');
   try {
+    sendBtn.disabled = true;
     if (state.selectedFile) {
-      sendBtn.disabled = true; sendBtn.textContent = 'Đang gửi...';
-      const f = state.selectedFile;
-      const buf = await f.arrayBuffer();
-      const { iv, ciphertext } = await encryptBytes(state.roomKey, buf);
-      const msgType = f.type.startsWith('video/') ? 'video' : 'image';
-      const res = await api('/api/messages', { method: 'POST', body: { msgType, ciphertext, iv, mimeType: f.type, mentions: [] } });
-      // Ve ngay tin nhan vua gui, khong cho WebSocket "vong" lai moi hien -
-      // neu socket cua minh dang reconnect thi minh se khong bi mat tin cua chinh minh.
+      sendBtn.textContent = 'Đang gửi...';
+      const res = await apiUpload('/api/messages/media', state.selectedFile);
       if (res && res.message) await appendMessage(res.message, true);
       state.selectedFile = null; fileInput.value = '';
       $('#upload-preview').classList.add('hidden');
     } else {
       const text = textInput.value.trim();
       if (!text) return;
-      const mentions = extractMentions(text);
-      const { iv, ciphertext } = await encryptText(state.roomKey, text);
-      const res = await api('/api/messages', { method: 'POST', body: { msgType: 'text', ciphertext, iv, mentions } });
+      const res = await api('/api/messages', { method: 'POST', body: { text } });
       if (res && res.message) await appendMessage(res.message, true);
       textInput.value = '';
     }
     hideMentionDropdown();
   } catch (err) {
-    showToast('Gửi thất bại: ' + (err.message || ''));
+    showToast('Gửi thất bại: ' + ((err.data && err.data.message) || err.message || ''));
   } finally {
     sendBtn.disabled = false; sendBtn.textContent = 'Gửi';
   }
 });
-
-function extractMentions(text) {
-  const found = new Set();
-  const re = /@([a-zA-Z0-9._-]{3,32})/g;
-  let match;
-  while ((match = re.exec(text))) {
-    if (state.userList.includes(match[1]) || match[1] === state.user.username) found.add(match[1]);
-  }
-  return Array.from(found);
-}
 
 /* --------------------------- @mention autocomplete ------------------------ */
 const mentionBox = $('#mention-dropdown');
@@ -592,7 +599,6 @@ async function loadAdminUsers() {
     list.innerHTML = '<p class="hint">Không tải được danh sách.</p>';
   }
 }
-
 function buildAdminRow(u) {
   const row = el('div', 'admin-row');
   const info = el('div', 'info');
@@ -606,17 +612,11 @@ function buildAdminRow(u) {
     const actions = el('div', 'actions');
     if (u.status === 'pending') {
       const approveBtn = el('button', 'btn-approve', 'Duyệt');
-      approveBtn.addEventListener('click', async () => {
-        await api(`/api/admin/users/${u.id}/approve`, { method: 'POST' });
-        loadAdminUsers();
-      });
+      approveBtn.addEventListener('click', async () => { await api(`/api/admin/users/${u.id}/approve`, { method: 'POST' }); loadAdminUsers(); });
       actions.appendChild(approveBtn);
     } else {
       const revokeBtn = el('button', 'btn-revoke', 'Thu hồi');
-      revokeBtn.addEventListener('click', async () => {
-        await api(`/api/admin/users/${u.id}/revoke`, { method: 'POST' });
-        loadAdminUsers();
-      });
+      revokeBtn.addEventListener('click', async () => { await api(`/api/admin/users/${u.id}/revoke`, { method: 'POST' }); loadAdminUsers(); });
       actions.appendChild(revokeBtn);
     }
     const delBtn = el('button', 'btn-delete', 'Xóa');
