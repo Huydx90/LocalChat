@@ -19,6 +19,7 @@ const state = {
   renderedIds: new Set(),
   allowedReactions: ['👍', '❤️', '😂', '😮', '😢', '😡', '🎉'], // gia tri mac dinh truoc khi sync tu server (xem loadMessages)
   limits: { maxImageBytes: 512000, maxVideoBytes: 10485760 }, // se duoc dong bo lai tu server
+  replyTarget: null, // { id, sender, preview } - dang chuan bi tra loi tin nhan nao (null = khong reply)
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -63,9 +64,10 @@ async function api(path, opts = {}) {
 }
 
 // Upload multipart (anh/video) - KHONG dung JSON/base64 de tranh phinh payload + RAM.
-async function apiUpload(path, file) {
+async function apiUpload(path, file, replyToId) {
   const form = new FormData();
   form.append('file', file, file.name || 'upload');
+  if (replyToId) form.append('replyToId', String(replyToId));
   const headers = {};
   if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
   const res = await fetch(path, { method: 'POST', headers, body: form });
@@ -200,6 +202,8 @@ function connectWebSocket() {
       showToast(`Người dùng mới đăng ký: ${msg.username}`);
     } else if (msg.type === 'reaction_updated') {
       updateReactionsUI(msg.messageId, msg.reactions);
+    } else if (msg.type === 'message_deleted') {
+      removeMessageFromDOM(msg.id);
     }
   };
 
@@ -308,22 +312,37 @@ async function buildBubble(m) {
   const mine = m.sender === state.user.username;
   const row = el('div', `bubble-row ${mine ? 'mine' : 'theirs'}`);
   row.dataset.messageId = m.id;
+  row.dataset.sender = m.sender; // dung khi nguoi khac bam "Tra loi" tin nay
   const meta = el('div', 'bubble-meta', `${mine ? 'Bạn' : m.sender} · ${formatTime(m.created_at)}`);
   const bubble = el('div', 'bubble');
+
+  const quote = buildReplyQuoteBlock(m);
+  if (quote) bubble.appendChild(quote);
 
   let plainTextForCopy = null;
   if (m.msg_type === 'text') {
     plainTextForCopy = m.text != null ? m.text : '';
-    bubble.innerHTML = renderMentions(escapeHtml(plainTextForCopy), m.mentions);
+    const textEl = el('span');
+    textEl.innerHTML = renderMentions(escapeHtml(plainTextForCopy), m.mentions);
+    bubble.appendChild(textEl);
     if (isEmojiOnlyMessage(plainTextForCopy)) bubble.classList.add('bubble-emoji-only');
+    row.dataset.preview = plainTextForCopy.length > 140 ? plainTextForCopy.slice(0, 140) + '…' : plainTextForCopy;
   } else if (m.msg_type === 'image') {
     const img = el('img'); img.alt = 'Ảnh đính kèm'; img.loading = 'lazy';
+    img.addEventListener('dblclick', (e) => { e.stopPropagation(); if (img.src) openMediaLightbox('image', img.src); });
     bubble.appendChild(img);
     loadMediaInto(img, m.id);
+    row.dataset.preview = '📷 Hình ảnh';
   } else if (m.msg_type === 'video') {
-    const vid = el('video'); vid.controls = true;
-    bubble.appendChild(vid);
+    // Chi hien khung preview (khong controls) - double-click de mo lon giua man hinh.
+    const wrap = el('div', 'video-preview-wrap');
+    const vid = el('video'); vid.muted = true; vid.playsInline = true; vid.preload = 'metadata';
+    const playIcon = el('div', 'video-play-icon', '▶');
+    wrap.appendChild(vid); wrap.appendChild(playIcon);
+    wrap.addEventListener('dblclick', (e) => { e.stopPropagation(); if (vid.src) openMediaLightbox('video', vid.src); });
+    bubble.appendChild(wrap);
     loadMediaInto(vid, m.id);
+    row.dataset.preview = '🎥 Video';
   }
 
   const btnRow = el('div', 'bubble-btn-row');
@@ -344,8 +363,168 @@ async function buildBubble(m) {
   row.appendChild(meta);
   row.appendChild(bubble);
   row.appendChild(buildReactionsBar(m.reactions || []));
+  attachBubbleContextMenu(bubble, m.id);
   return row;
 }
+
+// ---- Reply: khoi trich dan hien trong bubble (neu tin nay la mot reply) ----
+function buildReplyQuoteBlock(m) {
+  if (!m.reply_to_sender && !m.reply_to_preview) return null;
+  const q = el('div', 'reply-quote');
+  const senderLabel = m.reply_to_sender === state.user.username ? 'Bạn' : (m.reply_to_sender || 'Người dùng');
+  q.appendChild(el('span', 'reply-quote-sender', senderLabel));
+  q.appendChild(el('span', 'reply-quote-text', m.reply_to_preview || ''));
+  if (m.reply_to_id) {
+    q.classList.add('clickable');
+    q.addEventListener('click', (e) => { e.stopPropagation(); scrollToMessage(m.reply_to_id); });
+  }
+  return q;
+}
+function scrollToMessage(messageId) {
+  const row = document.querySelector(`.bubble-row[data-message-id="${messageId}"]`);
+  if (!row) { showToast('Không tìm thấy tin nhắn gốc (có thể đã cũ hoặc bị xóa).'); return; }
+  row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  row.classList.remove('flash-highlight');
+  void row.offsetWidth; // force reflow de restart animation neu bam nhieu lan lien tiep
+  row.classList.add('flash-highlight');
+  setTimeout(() => row.classList.remove('flash-highlight'), 1200);
+}
+
+/* ---------------------- Submenu chuột phải / giữ (context menu) ---------------------- */
+// Kich hoat qua: click chuot phai (contextmenu), GIU chuot trai (mousedown ~500ms),
+// hoac cham giu tren cam ung (touchstart ~500ms) - dung 1 ham showContextMenu chung.
+const contextMenu = $('#context-menu');
+function hideContextMenu() {
+  contextMenu.classList.add('hidden');
+  contextMenu.innerHTML = '';
+  document.removeEventListener('click', hideContextMenuOnce);
+  window.removeEventListener('scroll', hideContextMenuOnce, true);
+}
+function hideContextMenuOnce() { hideContextMenu(); }
+function showContextMenu(x, y, messageId) {
+  hideContextMenu();
+  const replyItem = el('button', 'context-menu-item', '↩️ Trả lời');
+  replyItem.type = 'button';
+  replyItem.addEventListener('click', () => { hideContextMenu(); startReply(messageId); });
+  contextMenu.appendChild(replyItem);
+
+  if (state.user && state.user.role === 'admin') {
+    const delItem = el('button', 'context-menu-item danger', '🗑 Xóa');
+    delItem.type = 'button';
+    delItem.addEventListener('click', () => { hideContextMenu(); deleteMessage(messageId); });
+    contextMenu.appendChild(delItem);
+  }
+
+  contextMenu.style.left = '-9999px'; contextMenu.style.top = '-9999px';
+  contextMenu.classList.remove('hidden');
+  const rect = contextMenu.getBoundingClientRect();
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const left = Math.max(8, Math.min(x, vw - rect.width - 8));
+  const top = Math.max(8, Math.min(y, vh - rect.height - 8));
+  contextMenu.style.left = left + 'px';
+  contextMenu.style.top = top + 'px';
+  setTimeout(() => {
+    document.addEventListener('click', hideContextMenuOnce);
+    window.addEventListener('scroll', hideContextMenuOnce, true);
+  }, 0);
+}
+const LONG_PRESS_MS = 500;
+function attachBubbleContextMenu(bubble, messageId) {
+  bubble.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showContextMenu(e.clientX, e.clientY, messageId);
+  });
+  let pressTimer = null;
+  let pressStart = null;
+  const startPress = (x, y) => {
+    pressStart = { x, y };
+    pressTimer = setTimeout(() => showContextMenu(x, y, messageId), LONG_PRESS_MS);
+  };
+  const cancelPress = () => { clearTimeout(pressTimer); pressTimer = null; pressStart = null; };
+  bubble.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return; // chi chuot trai - chuot phai da co contextmenu o tren
+    startPress(e.clientX, e.clientY);
+  });
+  ['mouseup', 'mouseleave'].forEach(ev => bubble.addEventListener(ev, cancelPress));
+  bubble.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return;
+    const t = e.touches[0];
+    startPress(t.clientX, t.clientY);
+  }, { passive: true });
+  ['touchend', 'touchcancel'].forEach(ev => bubble.addEventListener(ev, cancelPress));
+  bubble.addEventListener('touchmove', (e) => {
+    if (!pressStart) return;
+    const t = e.touches[0];
+    if (Math.abs(t.clientX - pressStart.x) > 10 || Math.abs(t.clientY - pressStart.y) > 10) cancelPress();
+  }, { passive: true });
+}
+
+/* -------------------------------- Reply UI -------------------------------- */
+function startReply(messageId) {
+  const row = document.querySelector(`.bubble-row[data-message-id="${messageId}"]`);
+  if (!row) return;
+  state.replyTarget = {
+    id: Number(messageId),
+    sender: row.dataset.sender || '',
+    preview: row.dataset.preview || ''
+  };
+  renderReplyPreviewBar();
+  textInput.focus();
+}
+function renderReplyPreviewBar() {
+  const bar = $('#reply-preview');
+  if (!state.replyTarget) { bar.classList.add('hidden'); return; }
+  $('#reply-preview-sender').textContent = state.replyTarget.sender === state.user.username ? 'Bạn' : state.replyTarget.sender;
+  $('#reply-preview-text').textContent = state.replyTarget.preview;
+  bar.classList.remove('hidden');
+}
+$('#btn-cancel-reply').addEventListener('click', () => {
+  state.replyTarget = null;
+  renderReplyPreviewBar();
+});
+
+/* -------------------------------- Xóa tin nhắn (admin) --------------------------------- */
+async function deleteMessage(messageId) {
+  if (!confirm('Xóa tin nhắn này? Hành động này không thể hoàn tác.')) return;
+  try {
+    await api(`/api/messages/${messageId}`, { method: 'DELETE' });
+    removeMessageFromDOM(messageId);
+  } catch (err) {
+    showToast('Không xóa được tin nhắn: ' + ((err.data && err.data.message) || err.message || ''));
+  }
+}
+function removeMessageFromDOM(messageId) {
+  const row = document.querySelector(`.bubble-row[data-message-id="${messageId}"]`);
+  if (row) row.remove();
+  state.renderedIds.delete(Number(messageId));
+}
+
+/* -------------------------- Lightbox xem ảnh/video phóng to -------------------------- */
+function openMediaLightbox(kind, src) {
+  const content = $('#lightbox-content');
+  content.innerHTML = '';
+  if (kind === 'image') {
+    const img = el('img'); img.src = src; img.alt = 'Ảnh phóng to';
+    content.appendChild(img);
+  } else {
+    const vid = el('video'); vid.src = src; vid.controls = true; vid.autoplay = true; vid.playsInline = true;
+    content.appendChild(vid);
+  }
+  $('#media-lightbox').classList.remove('hidden');
+}
+function closeMediaLightbox() {
+  const content = $('#lightbox-content');
+  content.querySelectorAll('video').forEach(v => { try { v.pause(); } catch {} });
+  content.innerHTML = '';
+  $('#media-lightbox').classList.add('hidden');
+}
+$('#btn-lightbox-close').addEventListener('click', closeMediaLightbox);
+$('#media-lightbox').addEventListener('click', (e) => {
+  if (e.target.id === 'media-lightbox') closeMediaLightbox();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('#media-lightbox').classList.contains('hidden')) closeMediaLightbox();
+});
 
 // Tai noi dung anh/video qua endpoint rieng (server giai ma AES-256-GCM roi tra ve).
 // Dung fetch + Authorization header (khong nhet token vao URL) roi tao blob URL.
@@ -669,21 +848,24 @@ async function prepareImageForUpload(file) {
 $('#form-send').addEventListener('submit', async (e) => {
   e.preventDefault();
   const sendBtn = document.querySelector('.btn-send');
+  const replyToId = state.replyTarget ? state.replyTarget.id : null;
   try {
     sendBtn.disabled = true;
     if (state.selectedFile) {
       sendBtn.textContent = 'Đang gửi...';
-      const res = await apiUpload('/api/messages/media', state.selectedFile);
+      const res = await apiUpload('/api/messages/media', state.selectedFile, replyToId);
       if (res && res.message) await appendMessage(res.message, true);
       state.selectedFile = null; fileInput.value = '';
       $('#upload-preview').classList.add('hidden');
     } else {
       const text = textInput.value.trim();
       if (!text) return;
-      const res = await api('/api/messages', { method: 'POST', body: { text } });
+      const res = await api('/api/messages', { method: 'POST', body: { text, replyToId } });
       if (res && res.message) await appendMessage(res.message, true);
       textInput.value = '';
     }
+    state.replyTarget = null;
+    renderReplyPreviewBar();
     hideMentionDropdown();
   } catch (err) {
     showToast('Gửi thất bại: ' + ((err.data && err.data.message) || err.message || ''));
