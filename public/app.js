@@ -20,6 +20,8 @@ const state = {
   allowedReactions: ['👍', '❤️', '😂', '😮', '😢', '😡', '🎉'], // gia tri mac dinh truoc khi sync tu server (xem loadMessages)
   limits: { maxImageBytes: 512000, maxVideoBytes: 10485760 }, // se duoc dong bo lai tu server
   replyTarget: null, // { id, sender, preview } - dang chuan bi tra loi tin nhan nao (null = khong reply)
+  newestId: null,    // id tin nhan moi nhat da render - dung cho polling fallback (afterId)
+  wsFailCount: 0,    // dem so lan WS that bai lien tiep - chi toast canh bao 1 lan, khong spam
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -111,6 +113,7 @@ function logout(closeSocket = true) {
   state.user = null;
   localStorage.removeItem('chat_token');
   if (closeSocket && state.ws) { try { state.ws.close(); } catch {} }
+  stopPolling();
   showView('#view-auth');
 }
 
@@ -166,6 +169,7 @@ function enterChat() {
   $('#btn-admin').classList.toggle('hidden', state.user.role !== 'admin');
   showView('#view-chat');
   connectWebSocket();
+  startPolling();
   loadUserList();
   loadMessages(true);
 }
@@ -176,6 +180,8 @@ function connectWebSocket() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(state.token)}`);
   state.ws = ws;
+
+  ws.onopen = () => { state.wsFailCount = 0; };
 
   ws.onmessage = async (evt) => {
     let msg;
@@ -208,10 +214,42 @@ function connectWebSocket() {
   };
 
   ws.onclose = (evt) => {
-    if (evt.code === 4001 || evt.code === 4002) return;
+    if (evt.code === 4001 || evt.code === 4002 || evt.code === 4003) return;
+    state.wsFailCount++;
+    if (state.wsFailCount === 3) {
+      showToast('Không kết nối được realtime (WebSocket) - đang dùng cập nhật định kỳ (~4s/lần). Mạng của bạn có thể đang chặn WebSocket.');
+    }
     clearTimeout(state.wsReconnectTimer);
     state.wsReconnectTimer = setTimeout(() => { if (state.token) connectWebSocket(); }, 3000);
   };
+}
+
+/* --------------------------- Polling fallback (khi WS bị chặn) --------------------------- *
+ * Mot so mang (vd mang cong ty) chan wss:// nhung van cho https:// di qua binh thuong.
+ * Khi do WebSocket se lien tuc that bai (xem ws.onclose o tren). De tin nhan van cap nhat
+ * gan-realtime trong truong hop nay, client tu hoi dinh ky qua REST API binh thuong
+ * (GET /api/messages?afterId=...) - dung DUNG giao thuc HTTPS da chung minh la khong bi
+ * chan (vi load tin nhan/gui tin nhan van hoat dong binh thuong qua HTTP).
+ * Chi thuc su goi poll khi WS KHONG o trang thai OPEN, de tranh goi thua khi WS dang chay tot. */
+let pollTimer = null;
+const POLL_INTERVAL_MS = 4000;
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(async () => {
+    if (!state.token || $('#view-chat').classList.contains('hidden')) return;
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) return; // WS dang chay tot, khong can poll
+    try { await pollForNewMessages(); } catch { /* im lang, thu lai chu ky sau */ }
+  }, POLL_INTERVAL_MS);
+}
+function stopPolling() { clearInterval(pollTimer); pollTimer = null; }
+
+async function pollForNewMessages() {
+  if (state.newestId == null) return;
+  const data = await api(`/api/messages?afterId=${state.newestId}&limit=100`);
+  for (const m of data.messages) {
+    await appendMessage(m, true);
+    if (m.sender !== state.user.username && !isChatFocused()) bumpUnread();
+  }
 }
 
 function isChatFocused() {
@@ -271,6 +309,7 @@ async function loadMessages() {
     if (data.maxVideoBytes) state.limits.maxVideoBytes = data.maxVideoBytes;
     $('#messages').innerHTML = '';
     state.renderedIds.clear();
+    state.newestId = null;
     for (const m of data.messages) await appendMessage(m, false);
     if (data.messages.length > 0) state.oldestId = data.messages[0].id;
     $('#btn-load-more').classList.toggle('hidden', data.messages.length < 50);
@@ -301,6 +340,7 @@ function scrollToBottom() { const box = $('#messages'); box.scrollTop = box.scro
 async function appendMessage(m, autoscroll) {
   if (m.id && state.renderedIds.has(m.id)) return;
   if (m.id) state.renderedIds.add(m.id);
+  if (m.id && (state.newestId == null || m.id > state.newestId)) state.newestId = m.id;
   const box = $('#messages');
   const wasAtBottom = isScrolledToBottom();
   box.appendChild(await buildBubble(m));
@@ -495,7 +535,17 @@ async function deleteMessage(messageId) {
 }
 function removeMessageFromDOM(messageId) {
   const row = document.querySelector(`.bubble-row[data-message-id="${messageId}"]`);
-  if (row) row.remove();
+  if (row) {
+    // STEP 4 (performance): giai phong object URL (anh/video, tao boi
+    // loadMediaInto() qua URL.createObjectURL()) TRUOC khi xoa khoi DOM -
+    // neu khong, trinh duyet se giu tham chieu blob nay trong bo nho vo han
+    // (memory leak) du DOM node da bi go bo. Ap dung cho MOI <img>/<video>
+    // con trong hang tin nhan nay (kha nang co ca preview reply-quote sau nay).
+    row.querySelectorAll('img[src^="blob:"], video[src^="blob:"]').forEach((mediaEl) => {
+      try { URL.revokeObjectURL(mediaEl.src); } catch { /* bo qua - khong quan trong */ }
+    });
+    row.remove();
+  }
   state.renderedIds.delete(Number(messageId));
 }
 
@@ -791,9 +841,13 @@ async function loadImageBitmap(file) {
   }
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error('Không đọc được ảnh.'));
-    img.src = URL.createObjectURL(file);
+    const objectUrl = URL.createObjectURL(file);
+    // STEP 4 (performance): anh <img> nay chi dung TAM THOI de doc kich thuoc
+    // (khong gan vao DOM, khong hien thi) - giai phong object URL ngay sau khi
+    // load xong/loi, tranh giu blob trong bo nho lau hon can thiet.
+    img.onload = () => { URL.revokeObjectURL(objectUrl); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error('Không đọc được ảnh.')); };
+    img.src = objectUrl;
   });
 }
 function canvasToBlob(source, width, height, quality) {
