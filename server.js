@@ -770,9 +770,27 @@ app.use(express.json({ limit: '64kb' })); // chi con dung cho auth/text-message/
 // han CDN khoi script-src), co the vendor hoa heic2any.min.js vao
 // public/vendor/ va phuc vu tu server nay - de xuat migration, CHUA lam o
 // STEP nay (ngoai pham vi, xem "OUT OF SCOPE / FOLLOW-UP").
+//
+// PRODUCTION FIX (phat hien tu loi thuc te tren Render, sau khi CSP o tren da
+// chay production): "heic2any" tao 1 Web Worker tu 1 "blob:" URL (ky thuat
+// pho bien de dong goi worker code inline trong 1 file .min.js duy nhat,
+// khong can file .js rieng cho worker). Trinh duyet kiem tra viec tao worker
+// theo directive "worker-src" - truoc day CSP KHONG khai bao "worker-src"
+// tuong minh, nen trinh duyet FALLBACK ve "script-src" (theo dung spec CSP
+// Level 3), va "script-src" khong co "blob:" trong danh sach nguon cho phep
+// -> trinh duyet CHAN viec tao worker, HEIC client-side conversion that bai
+// hoan toan (loi: "Creating a worker from 'blob:...' violates ... script-src").
+// Day la 1 lo hong trong audit ban dau: minh chi kiem tra script/style/img/
+// media/connect-src ma public/app.js TRUC TIEP dung, nhung khong luong truoc
+// hanh vi NOI BO cua chinh thu vien CDN (heic2any tu tao worker, khong phai
+// thu ma code cua chung ta goi truc tiep). Fix: khai bao "worker-src" RIENG
+// (khong con fallback ve script-src nua) voi "blob:" duoc cho phep - CHI cho
+// worker, KHONG mo rong "script-src" (giu script-src hep nhu cu, tranh mo
+// rong be mat XSS cho <script>/injection thuong).
 const CSP_HEADER = [
     "default-src 'self'",
     "script-src 'self' https://cdn.jsdelivr.net",
+    "worker-src 'self' blob:",
     "style-src 'self'",
     "img-src 'self' blob:",
     "media-src 'self' blob:",

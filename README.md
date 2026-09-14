@@ -249,12 +249,14 @@ Toàn bộ state nằm **trong bộ nhớ 1 process** — chấp nhận được
 **Security headers** (audit trước khi viết CSP — không áp đặt mù quáng): quét `public/index.html`/`app.js`/`style.css` xác nhận **chỉ 1 CDN bên ngoài** (`cdn.jsdelivr.net` cho `heic2any`), không có `<script>`/`<style>` inline, không `eval()`/`new Function()`, không `data:` URI, media hiển thị qua `blob:` (từ `createObjectURL`). Nhờ vậy CSP có thể strict mà không cần `unsafe-inline`/`unsafe-eval`:
 
 ```
-default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self';
-img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none';
-base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; worker-src 'self' blob:;
+style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self';
+object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
 ```
 
-Kèm `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy` (tắt geolocation/camera/microphone/payment/usb..., **giữ nguyên** clipboard-write vì nút "Copy" đang dùng). **Known limitation**: `cdn.jsdelivr.net` vẫn là dependency ngoài trong `script-src` — nếu mạng công ty chặn CDN này, HEIC client-side conversion thất bại nhưng rơi xuống server-side fallback có sẵn (không vỡ UI). Đề xuất follow-up: vendor hóa `heic2any.min.js` vào `public/vendor/` để siết CSP chặt hơn nữa (chưa làm ở STEP này — ngoài phạm vi).
+**Production fix (2026-09-14)**: sau khi lên production, `heic2any` báo lỗi CSP chặn việc tạo Web Worker (`Creating a worker from 'blob:...' violates ... script-src`). Nguyên nhân: `heic2any` tự tạo Worker từ 1 `blob:` URL (kỹ thuật đóng gói worker code inline trong 1 file `.min.js` duy nhất) — hành vi này nằm **bên trong thư viện CDN**, không phải thứ code của chính app gọi trực tiếp, nên đợt audit ban đầu (chỉ quét `public/*`) không phát hiện ra. CSP kiểm tra việc tạo worker theo directive `worker-src`; vì CSP ban đầu không khai báo `worker-src` riêng, trình duyệt **fallback về `script-src`** (đúng theo spec CSP Level 3) — và `script-src` không cho phép `blob:`, nên worker bị chặn, HEIC client-side conversion thất bại hoàn toàn. Đã thêm `worker-src 'self' blob:` — **tách riêng**, không mở rộng `script-src` (giữ `script-src` hẹp như cũ, chỉ cho phép đúng 1 CDN cần thiết, không mở rộng bề mặt cho `<script>`/injection thường).
+
+Kèm `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy` (tắt geolocation/camera/microphone/payment/usb..., **giữ nguyên** clipboard-write vì nút "Copy" đang dùng). **Known limitation**: `cdn.jsdelivr.net` vẫn là dependency ngoài trong `script-src` — nếu mạng công ty chặn CDN này, HEIC client-side conversion thất bại nhưng rơi xuống server-side fallback có sẵn (không vỡ UI). Đề xuất follow-up: vendor hóa `heic2any.min.js` vào `public/vendor/` để siết CSP chặt hơn nữa (chưa làm ở STEP này — ngoài phạm vi). **Bài học rút ra**: khi audit CSP cho 1 thư viện CDN bên thứ ba, không chỉ quét code của chính mình — thư viện có thể có hành vi runtime nội bộ (tạo worker, mở iframe, gọi API khác...) không thấy được qua audit tĩnh; cách chắc chắn nhất vẫn là kiểm thử thực tế trên production/staging trước khi coi CSP là hoàn chỉnh.
 
 **CORS**: audit xác nhận app hiện tại **same-origin thuần túy** (không dùng package `cors`, không set `Access-Control-Allow-Origin` ở đâu cả) — giữ nguyên, không thêm CORS middleware (đúng §18: không đổi CORS nếu project không dùng CORS).
 
