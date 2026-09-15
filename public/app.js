@@ -822,12 +822,42 @@ $('#btn-cancel-upload').addEventListener('click', () => {
 /* ---- HEIC/HEIF -> JPEG (client-side, uu tien) - dung thu vien heic2any tai
    tu CDN trong index.html. Neu thu vien khong ton tai (chan mang) hoac giai
    ma that bai (file loi, browser khong ho tro decode HEIC), nem loi de noi
-   goi (fileInput handler) rot xuong phuong an gui HEIC goc len server. ---- */
+   goi (fileInput handler) rot xuong phuong an gui HEIC goc len server. ----
+   PRODUCTION FIX (2026-09-14): tren 1 so trinh duyet/mang, heic2any tao 1 Web
+   Worker roi ben trong worker do goi new Function() - neu bi Content-Security-
+   Policy chan (khong co 'unsafe-eval'), loi CSP nay xay ra SAU trong 1 boi
+   canh (worker internal) ma heic2any co the KHONG lang nghe ("worker.onerror")
+   de bien no thanh 1 Promise bi reject dung cach - console hien "Uncaught
+   EvalError" (KHONG co "(in promise)"), dau hieu day la loi khong di qua
+   promise chain nao ca. Neu vay, "await window.heic2any(...)" co the treo VO
+   HAN (khong bao gio resolve/reject), khien try/catch o fileInput handler
+   KHONG BAO GIO chay, nut "Gui" bi ket lai voi HEIC ma khong co canh bao/
+   fallback nao. Thay vi mo rong CSP them "unsafe-eval" (lam yeu bao ve XSS
+   toan trang chi vi 1 hanh vi noi bo dang ngo cua 1 thu vien ben thu 3), ta
+   dat 1 GIOI HAN THOI GIAN CHO tuong minh (giong pattern da dung cho HEIC
+   conversion PHIA SERVER - xem HEIC_CONVERT_TIMEOUT_MS trong server.js): neu
+   heic2any khong tra ket qua trong khoang thoi gian hop ly, CHU DONG bo cuoc
+   cho no va rot xuong server-side fallback, thay vi tin tuong tuyet doi rang
+   Promise cua 1 thu vien ngoai LUON settle. Cach nay xu ly dung ca 2 kha nang
+   (promise thuc su reject cham, HOAC treo vinh vien) ma khong can biet chinh
+   xac nguyen nhan that bai la gi. */
+const HEIC_CLIENT_CONVERT_TIMEOUT_MS = 20000; // 20s - du cho anh HEIC thuong,
+// khong qua dai de nguoi dung phai cho lau truoc khi thay fallback server.
 async function convertHeicClientSide(file) {
   if (typeof window.heic2any !== 'function') {
     throw new Error('heic2any_unavailable');
   }
-  const result = await window.heic2any({ blob: file, toType: 'image/jpeg', quality: 0.85 });
+  const conversion = window.heic2any({ blob: file, toType: 'image/jpeg', quality: 0.85 });
+  // Neu "conversion" sau nay (SAU KHI ta da bo cuoc cho no vi timeout) tu no
+  // roi vao trang thai rejected, gan 1 .catch() no o day de trinh duyet KHONG
+  // in ra canh bao "Unhandled promise rejection" vo ich trong console - hoan
+  // toan khong anh huong ket qua/luong xu ly chinh (da quyet dinh xong qua
+  // Promise.race ben duoi).
+  if (conversion && typeof conversion.catch === 'function') conversion.catch(() => {});
+  const result = await Promise.race([
+    conversion,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('heic2any_timeout')), HEIC_CLIENT_CONVERT_TIMEOUT_MS)),
+  ]);
   // heic2any co the tra ve 1 Blob hoac mang Blob (anh HEIC nhieu frame/live photo) -
   // ta chi can frame dau tien cho chat.
   const blob = Array.isArray(result) ? result[0] : result;
