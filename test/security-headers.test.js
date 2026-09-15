@@ -69,6 +69,12 @@ test('STEP 3.3 §17/§31 - Security headers tren moi response', { skip: !canRun 
         assert.ok(csp, 'phai co Content-Security-Policy header');
         assert.match(csp, /default-src 'self'/);
         assert.match(csp, /script-src[^;]*'self'[^;]*https:\/\/cdn\.jsdelivr\.net/);
+        // Production regression (2026-09-14): heic2any tao Web Worker tu 1
+        // "blob:" URL - khong co "worker-src" rieng se FALLBACK ve script-src
+        // (khong co "blob:" o do), khien trinh duyet CHAN worker va HEIC
+        // client-side conversion gay loi that tren production. worker-src
+        // PHAI duoc khai bao rieng, cho phep "blob:".
+        assert.match(csp, /worker-src[^;]*'self'[^;]*blob:/, 'worker-src phai cho phep blob: (heic2any tao Web Worker tu blob: URL) - thieu directive nay se lam HEIC client-side conversion bi CSP chan tren production');
         assert.match(csp, /frame-ancestors 'none'/);
         assert.match(csp, /object-src 'none'/);
         // KHONG duoc co 'unsafe-inline'/'unsafe-eval' (audit xac nhan app khong
