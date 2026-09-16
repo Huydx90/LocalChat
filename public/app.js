@@ -19,9 +19,6 @@ const state = {
   renderedIds: new Set(),
   allowedReactions: ['👍', '❤️', '😂', '😮', '😢', '😡', '🎉'], // gia tri mac dinh truoc khi sync tu server (xem loadMessages)
   limits: { maxImageBytes: 512000, maxVideoBytes: 10485760 }, // se duoc dong bo lai tu server
-  replyTarget: null, // { id, sender, preview } - dang chuan bi tra loi tin nhan nao (null = khong reply)
-  newestId: null,    // id tin nhan moi nhat da render - dung cho polling fallback (afterId)
-  wsFailCount: 0,    // dem so lan WS that bai lien tiep - chi toast canh bao 1 lan, khong spam
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -66,10 +63,9 @@ async function api(path, opts = {}) {
 }
 
 // Upload multipart (anh/video) - KHONG dung JSON/base64 de tranh phinh payload + RAM.
-async function apiUpload(path, file, replyToId) {
+async function apiUpload(path, file) {
   const form = new FormData();
   form.append('file', file, file.name || 'upload');
-  if (replyToId) form.append('replyToId', String(replyToId));
   const headers = {};
   if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
   const res = await fetch(path, { method: 'POST', headers, body: form });
@@ -113,7 +109,6 @@ function logout(closeSocket = true) {
   state.user = null;
   localStorage.removeItem('chat_token');
   if (closeSocket && state.ws) { try { state.ws.close(); } catch {} }
-  stopPolling();
   showView('#view-auth');
 }
 
@@ -169,7 +164,6 @@ function enterChat() {
   $('#btn-admin').classList.toggle('hidden', state.user.role !== 'admin');
   showView('#view-chat');
   connectWebSocket();
-  startPolling();
   loadUserList();
   loadMessages(true);
 }
@@ -180,8 +174,6 @@ function connectWebSocket() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(state.token)}`);
   state.ws = ws;
-
-  ws.onopen = () => { state.wsFailCount = 0; };
 
   ws.onmessage = async (evt) => {
     let msg;
@@ -208,48 +200,14 @@ function connectWebSocket() {
       showToast(`Người dùng mới đăng ký: ${msg.username}`);
     } else if (msg.type === 'reaction_updated') {
       updateReactionsUI(msg.messageId, msg.reactions);
-    } else if (msg.type === 'message_deleted') {
-      removeMessageFromDOM(msg.id);
     }
   };
 
   ws.onclose = (evt) => {
-    if (evt.code === 4001 || evt.code === 4002 || evt.code === 4003) return;
-    state.wsFailCount++;
-    if (state.wsFailCount === 3) {
-      showToast('Không kết nối được realtime (WebSocket) - đang dùng cập nhật định kỳ (~4s/lần). Mạng của bạn có thể đang chặn WebSocket.');
-    }
+    if (evt.code === 4001 || evt.code === 4002) return;
     clearTimeout(state.wsReconnectTimer);
     state.wsReconnectTimer = setTimeout(() => { if (state.token) connectWebSocket(); }, 3000);
   };
-}
-
-/* --------------------------- Polling fallback (khi WS bị chặn) --------------------------- *
- * Mot so mang (vd mang cong ty) chan wss:// nhung van cho https:// di qua binh thuong.
- * Khi do WebSocket se lien tuc that bai (xem ws.onclose o tren). De tin nhan van cap nhat
- * gan-realtime trong truong hop nay, client tu hoi dinh ky qua REST API binh thuong
- * (GET /api/messages?afterId=...) - dung DUNG giao thuc HTTPS da chung minh la khong bi
- * chan (vi load tin nhan/gui tin nhan van hoat dong binh thuong qua HTTP).
- * Chi thuc su goi poll khi WS KHONG o trang thai OPEN, de tranh goi thua khi WS dang chay tot. */
-let pollTimer = null;
-const POLL_INTERVAL_MS = 4000;
-function startPolling() {
-  stopPolling();
-  pollTimer = setInterval(async () => {
-    if (!state.token || $('#view-chat').classList.contains('hidden')) return;
-    if (state.ws && state.ws.readyState === WebSocket.OPEN) return; // WS dang chay tot, khong can poll
-    try { await pollForNewMessages(); } catch { /* im lang, thu lai chu ky sau */ }
-  }, POLL_INTERVAL_MS);
-}
-function stopPolling() { clearInterval(pollTimer); pollTimer = null; }
-
-async function pollForNewMessages() {
-  if (state.newestId == null) return;
-  const data = await api(`/api/messages?afterId=${state.newestId}&limit=100`);
-  for (const m of data.messages) {
-    await appendMessage(m, true);
-    if (m.sender !== state.user.username && !isChatFocused()) bumpUnread();
-  }
 }
 
 function isChatFocused() {
@@ -309,7 +267,6 @@ async function loadMessages() {
     if (data.maxVideoBytes) state.limits.maxVideoBytes = data.maxVideoBytes;
     $('#messages').innerHTML = '';
     state.renderedIds.clear();
-    state.newestId = null;
     for (const m of data.messages) await appendMessage(m, false);
     if (data.messages.length > 0) state.oldestId = data.messages[0].id;
     $('#btn-load-more').classList.toggle('hidden', data.messages.length < 50);
@@ -340,7 +297,6 @@ function scrollToBottom() { const box = $('#messages'); box.scrollTop = box.scro
 async function appendMessage(m, autoscroll) {
   if (m.id && state.renderedIds.has(m.id)) return;
   if (m.id) state.renderedIds.add(m.id);
-  if (m.id && (state.newestId == null || m.id > state.newestId)) state.newestId = m.id;
   const box = $('#messages');
   const wasAtBottom = isScrolledToBottom();
   box.appendChild(await buildBubble(m));
@@ -352,37 +308,22 @@ async function buildBubble(m) {
   const mine = m.sender === state.user.username;
   const row = el('div', `bubble-row ${mine ? 'mine' : 'theirs'}`);
   row.dataset.messageId = m.id;
-  row.dataset.sender = m.sender; // dung khi nguoi khac bam "Tra loi" tin nay
   const meta = el('div', 'bubble-meta', `${mine ? 'Bạn' : m.sender} · ${formatTime(m.created_at)}`);
   const bubble = el('div', 'bubble');
-
-  const quote = buildReplyQuoteBlock(m);
-  if (quote) bubble.appendChild(quote);
 
   let plainTextForCopy = null;
   if (m.msg_type === 'text') {
     plainTextForCopy = m.text != null ? m.text : '';
-    const textEl = el('span');
-    textEl.innerHTML = renderMentions(escapeHtml(plainTextForCopy), m.mentions);
-    bubble.appendChild(textEl);
+    bubble.innerHTML = renderMentions(escapeHtml(plainTextForCopy), m.mentions);
     if (isEmojiOnlyMessage(plainTextForCopy)) bubble.classList.add('bubble-emoji-only');
-    row.dataset.preview = plainTextForCopy.length > 140 ? plainTextForCopy.slice(0, 140) + '…' : plainTextForCopy;
   } else if (m.msg_type === 'image') {
     const img = el('img'); img.alt = 'Ảnh đính kèm'; img.loading = 'lazy';
-    img.addEventListener('dblclick', (e) => { e.stopPropagation(); if (img.src) openMediaLightbox('image', img.src); });
     bubble.appendChild(img);
     loadMediaInto(img, m.id);
-    row.dataset.preview = '📷 Hình ảnh';
   } else if (m.msg_type === 'video') {
-    // Chi hien khung preview (khong controls) - double-click de mo lon giua man hinh.
-    const wrap = el('div', 'video-preview-wrap');
-    const vid = el('video'); vid.muted = true; vid.playsInline = true; vid.preload = 'metadata';
-    const playIcon = el('div', 'video-play-icon', '▶');
-    wrap.appendChild(vid); wrap.appendChild(playIcon);
-    wrap.addEventListener('dblclick', (e) => { e.stopPropagation(); if (vid.src) openMediaLightbox('video', vid.src); });
-    bubble.appendChild(wrap);
+    const vid = el('video'); vid.controls = true;
+    bubble.appendChild(vid);
     loadMediaInto(vid, m.id);
-    row.dataset.preview = '🎥 Video';
   }
 
   const btnRow = el('div', 'bubble-btn-row');
@@ -403,178 +344,8 @@ async function buildBubble(m) {
   row.appendChild(meta);
   row.appendChild(bubble);
   row.appendChild(buildReactionsBar(m.reactions || []));
-  attachBubbleContextMenu(bubble, m.id);
   return row;
 }
-
-// ---- Reply: khoi trich dan hien trong bubble (neu tin nay la mot reply) ----
-function buildReplyQuoteBlock(m) {
-  if (!m.reply_to_sender && !m.reply_to_preview) return null;
-  const q = el('div', 'reply-quote');
-  const senderLabel = m.reply_to_sender === state.user.username ? 'Bạn' : (m.reply_to_sender || 'Người dùng');
-  q.appendChild(el('span', 'reply-quote-sender', senderLabel));
-  q.appendChild(el('span', 'reply-quote-text', m.reply_to_preview || ''));
-  if (m.reply_to_id) {
-    q.classList.add('clickable');
-    q.addEventListener('click', (e) => { e.stopPropagation(); scrollToMessage(m.reply_to_id); });
-  }
-  return q;
-}
-function scrollToMessage(messageId) {
-  const row = document.querySelector(`.bubble-row[data-message-id="${messageId}"]`);
-  if (!row) { showToast('Không tìm thấy tin nhắn gốc (có thể đã cũ hoặc bị xóa).'); return; }
-  row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  row.classList.remove('flash-highlight');
-  void row.offsetWidth; // force reflow de restart animation neu bam nhieu lan lien tiep
-  row.classList.add('flash-highlight');
-  setTimeout(() => row.classList.remove('flash-highlight'), 1200);
-}
-
-/* ---------------------- Submenu chuột phải / giữ (context menu) ---------------------- */
-// Kich hoat qua: click chuot phai (contextmenu), GIU chuot trai (mousedown ~500ms),
-// hoac cham giu tren cam ung (touchstart ~500ms) - dung 1 ham showContextMenu chung.
-const contextMenu = $('#context-menu');
-function hideContextMenu() {
-  contextMenu.classList.add('hidden');
-  contextMenu.innerHTML = '';
-  document.removeEventListener('click', hideContextMenuOnce);
-  window.removeEventListener('scroll', hideContextMenuOnce, true);
-}
-function hideContextMenuOnce() { hideContextMenu(); }
-function showContextMenu(x, y, messageId) {
-  hideContextMenu();
-  const replyItem = el('button', 'context-menu-item', '↩️ Trả lời');
-  replyItem.type = 'button';
-  replyItem.addEventListener('click', () => { hideContextMenu(); startReply(messageId); });
-  contextMenu.appendChild(replyItem);
-
-  if (state.user && state.user.role === 'admin') {
-    const delItem = el('button', 'context-menu-item danger', '🗑 Xóa');
-    delItem.type = 'button';
-    delItem.addEventListener('click', () => { hideContextMenu(); deleteMessage(messageId); });
-    contextMenu.appendChild(delItem);
-  }
-
-  contextMenu.style.left = '-9999px'; contextMenu.style.top = '-9999px';
-  contextMenu.classList.remove('hidden');
-  const rect = contextMenu.getBoundingClientRect();
-  const vw = window.innerWidth, vh = window.innerHeight;
-  const left = Math.max(8, Math.min(x, vw - rect.width - 8));
-  const top = Math.max(8, Math.min(y, vh - rect.height - 8));
-  contextMenu.style.left = left + 'px';
-  contextMenu.style.top = top + 'px';
-  setTimeout(() => {
-    document.addEventListener('click', hideContextMenuOnce);
-    window.addEventListener('scroll', hideContextMenuOnce, true);
-  }, 0);
-}
-const LONG_PRESS_MS = 500;
-function attachBubbleContextMenu(bubble, messageId) {
-  bubble.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    showContextMenu(e.clientX, e.clientY, messageId);
-  });
-  let pressTimer = null;
-  let pressStart = null;
-  const startPress = (x, y) => {
-    pressStart = { x, y };
-    pressTimer = setTimeout(() => showContextMenu(x, y, messageId), LONG_PRESS_MS);
-  };
-  const cancelPress = () => { clearTimeout(pressTimer); pressTimer = null; pressStart = null; };
-  bubble.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return; // chi chuot trai - chuot phai da co contextmenu o tren
-    startPress(e.clientX, e.clientY);
-  });
-  ['mouseup', 'mouseleave'].forEach(ev => bubble.addEventListener(ev, cancelPress));
-  bubble.addEventListener('touchstart', (e) => {
-    if (e.touches.length !== 1) return;
-    const t = e.touches[0];
-    startPress(t.clientX, t.clientY);
-  }, { passive: true });
-  ['touchend', 'touchcancel'].forEach(ev => bubble.addEventListener(ev, cancelPress));
-  bubble.addEventListener('touchmove', (e) => {
-    if (!pressStart) return;
-    const t = e.touches[0];
-    if (Math.abs(t.clientX - pressStart.x) > 10 || Math.abs(t.clientY - pressStart.y) > 10) cancelPress();
-  }, { passive: true });
-}
-
-/* -------------------------------- Reply UI -------------------------------- */
-function startReply(messageId) {
-  const row = document.querySelector(`.bubble-row[data-message-id="${messageId}"]`);
-  if (!row) return;
-  state.replyTarget = {
-    id: Number(messageId),
-    sender: row.dataset.sender || '',
-    preview: row.dataset.preview || ''
-  };
-  renderReplyPreviewBar();
-  textInput.focus();
-}
-function renderReplyPreviewBar() {
-  const bar = $('#reply-preview');
-  if (!state.replyTarget) { bar.classList.add('hidden'); return; }
-  $('#reply-preview-sender').textContent = state.replyTarget.sender === state.user.username ? 'Bạn' : state.replyTarget.sender;
-  $('#reply-preview-text').textContent = state.replyTarget.preview;
-  bar.classList.remove('hidden');
-}
-$('#btn-cancel-reply').addEventListener('click', () => {
-  state.replyTarget = null;
-  renderReplyPreviewBar();
-});
-
-/* -------------------------------- Xóa tin nhắn (admin) --------------------------------- */
-async function deleteMessage(messageId) {
-  if (!confirm('Xóa tin nhắn này? Hành động này không thể hoàn tác.')) return;
-  try {
-    await api(`/api/messages/${messageId}`, { method: 'DELETE' });
-    removeMessageFromDOM(messageId);
-  } catch (err) {
-    showToast('Không xóa được tin nhắn: ' + ((err.data && err.data.message) || err.message || ''));
-  }
-}
-function removeMessageFromDOM(messageId) {
-  const row = document.querySelector(`.bubble-row[data-message-id="${messageId}"]`);
-  if (row) {
-    // STEP 4 (performance): giai phong object URL (anh/video, tao boi
-    // loadMediaInto() qua URL.createObjectURL()) TRUOC khi xoa khoi DOM -
-    // neu khong, trinh duyet se giu tham chieu blob nay trong bo nho vo han
-    // (memory leak) du DOM node da bi go bo. Ap dung cho MOI <img>/<video>
-    // con trong hang tin nhan nay (kha nang co ca preview reply-quote sau nay).
-    row.querySelectorAll('img[src^="blob:"], video[src^="blob:"]').forEach((mediaEl) => {
-      try { URL.revokeObjectURL(mediaEl.src); } catch { /* bo qua - khong quan trong */ }
-    });
-    row.remove();
-  }
-  state.renderedIds.delete(Number(messageId));
-}
-
-/* -------------------------- Lightbox xem ảnh/video phóng to -------------------------- */
-function openMediaLightbox(kind, src) {
-  const content = $('#lightbox-content');
-  content.innerHTML = '';
-  if (kind === 'image') {
-    const img = el('img'); img.src = src; img.alt = 'Ảnh phóng to';
-    content.appendChild(img);
-  } else {
-    const vid = el('video'); vid.src = src; vid.controls = true; vid.autoplay = true; vid.playsInline = true;
-    content.appendChild(vid);
-  }
-  $('#media-lightbox').classList.remove('hidden');
-}
-function closeMediaLightbox() {
-  const content = $('#lightbox-content');
-  content.querySelectorAll('video').forEach(v => { try { v.pause(); } catch {} });
-  content.innerHTML = '';
-  $('#media-lightbox').classList.add('hidden');
-}
-$('#btn-lightbox-close').addEventListener('click', closeMediaLightbox);
-$('#media-lightbox').addEventListener('click', (e) => {
-  if (e.target.id === 'media-lightbox') closeMediaLightbox();
-});
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('#media-lightbox').classList.contains('hidden')) closeMediaLightbox();
-});
 
 // Tai noi dung anh/video qua endpoint rieng (server giai ma AES-256-GCM roi tra ve).
 // Dung fetch + Authorization header (khong nhet token vao URL) roi tao blob URL.
@@ -822,42 +593,12 @@ $('#btn-cancel-upload').addEventListener('click', () => {
 /* ---- HEIC/HEIF -> JPEG (client-side, uu tien) - dung thu vien heic2any tai
    tu CDN trong index.html. Neu thu vien khong ton tai (chan mang) hoac giai
    ma that bai (file loi, browser khong ho tro decode HEIC), nem loi de noi
-   goi (fileInput handler) rot xuong phuong an gui HEIC goc len server. ----
-   PRODUCTION FIX (2026-09-14): tren 1 so trinh duyet/mang, heic2any tao 1 Web
-   Worker roi ben trong worker do goi new Function() - neu bi Content-Security-
-   Policy chan (khong co 'unsafe-eval'), loi CSP nay xay ra SAU trong 1 boi
-   canh (worker internal) ma heic2any co the KHONG lang nghe ("worker.onerror")
-   de bien no thanh 1 Promise bi reject dung cach - console hien "Uncaught
-   EvalError" (KHONG co "(in promise)"), dau hieu day la loi khong di qua
-   promise chain nao ca. Neu vay, "await window.heic2any(...)" co the treo VO
-   HAN (khong bao gio resolve/reject), khien try/catch o fileInput handler
-   KHONG BAO GIO chay, nut "Gui" bi ket lai voi HEIC ma khong co canh bao/
-   fallback nao. Thay vi mo rong CSP them "unsafe-eval" (lam yeu bao ve XSS
-   toan trang chi vi 1 hanh vi noi bo dang ngo cua 1 thu vien ben thu 3), ta
-   dat 1 GIOI HAN THOI GIAN CHO tuong minh (giong pattern da dung cho HEIC
-   conversion PHIA SERVER - xem HEIC_CONVERT_TIMEOUT_MS trong server.js): neu
-   heic2any khong tra ket qua trong khoang thoi gian hop ly, CHU DONG bo cuoc
-   cho no va rot xuong server-side fallback, thay vi tin tuong tuyet doi rang
-   Promise cua 1 thu vien ngoai LUON settle. Cach nay xu ly dung ca 2 kha nang
-   (promise thuc su reject cham, HOAC treo vinh vien) ma khong can biet chinh
-   xac nguyen nhan that bai la gi. */
-const HEIC_CLIENT_CONVERT_TIMEOUT_MS = 20000; // 20s - du cho anh HEIC thuong,
-// khong qua dai de nguoi dung phai cho lau truoc khi thay fallback server.
+   goi (fileInput handler) rot xuong phuong an gui HEIC goc len server. ---- */
 async function convertHeicClientSide(file) {
   if (typeof window.heic2any !== 'function') {
     throw new Error('heic2any_unavailable');
   }
-  const conversion = window.heic2any({ blob: file, toType: 'image/jpeg', quality: 0.85 });
-  // Neu "conversion" sau nay (SAU KHI ta da bo cuoc cho no vi timeout) tu no
-  // roi vao trang thai rejected, gan 1 .catch() no o day de trinh duyet KHONG
-  // in ra canh bao "Unhandled promise rejection" vo ich trong console - hoan
-  // toan khong anh huong ket qua/luong xu ly chinh (da quyet dinh xong qua
-  // Promise.race ben duoi).
-  if (conversion && typeof conversion.catch === 'function') conversion.catch(() => {});
-  const result = await Promise.race([
-    conversion,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('heic2any_timeout')), HEIC_CLIENT_CONVERT_TIMEOUT_MS)),
-  ]);
+  const result = await window.heic2any({ blob: file, toType: 'image/jpeg', quality: 0.85 });
   // heic2any co the tra ve 1 Blob hoac mang Blob (anh HEIC nhieu frame/live photo) -
   // ta chi can frame dau tien cho chat.
   const blob = Array.isArray(result) ? result[0] : result;
@@ -871,13 +612,9 @@ async function loadImageBitmap(file) {
   }
   return new Promise((resolve, reject) => {
     const img = new Image();
-    const objectUrl = URL.createObjectURL(file);
-    // STEP 4 (performance): anh <img> nay chi dung TAM THOI de doc kich thuoc
-    // (khong gan vao DOM, khong hien thi) - giai phong object URL ngay sau khi
-    // load xong/loi, tranh giu blob trong bo nho lau hon can thiet.
-    img.onload = () => { URL.revokeObjectURL(objectUrl); resolve(img); };
-    img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error('Không đọc được ảnh.')); };
-    img.src = objectUrl;
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Không đọc được ảnh.'));
+    img.src = URL.createObjectURL(file);
   });
 }
 function canvasToBlob(source, width, height, quality) {
@@ -932,24 +669,21 @@ async function prepareImageForUpload(file) {
 $('#form-send').addEventListener('submit', async (e) => {
   e.preventDefault();
   const sendBtn = document.querySelector('.btn-send');
-  const replyToId = state.replyTarget ? state.replyTarget.id : null;
   try {
     sendBtn.disabled = true;
     if (state.selectedFile) {
       sendBtn.textContent = 'Đang gửi...';
-      const res = await apiUpload('/api/messages/media', state.selectedFile, replyToId);
+      const res = await apiUpload('/api/messages/media', state.selectedFile);
       if (res && res.message) await appendMessage(res.message, true);
       state.selectedFile = null; fileInput.value = '';
       $('#upload-preview').classList.add('hidden');
     } else {
       const text = textInput.value.trim();
       if (!text) return;
-      const res = await api('/api/messages', { method: 'POST', body: { text, replyToId } });
+      const res = await api('/api/messages', { method: 'POST', body: { text } });
       if (res && res.message) await appendMessage(res.message, true);
       textInput.value = '';
     }
-    state.replyTarget = null;
-    renderReplyPreviewBar();
     hideMentionDropdown();
   } catch (err) {
     showToast('Gửi thất bại: ' + ((err.data && err.data.message) || err.message || ''));
