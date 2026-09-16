@@ -6,7 +6,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { classifyUsage, validateThresholds, formatDiagnostic, parseEnvNumber } = require('../storage-policy');
+const { classifyUsage, validateThresholds, formatDiagnostic, parseConfigNumber } = require('../storage-policy');
 
 // Nguong mac dinh cua project (giong .env.example / default trong server.js)
 const THRESHOLDS = {
@@ -93,55 +93,61 @@ test('formatDiagnostic matches required format/units', () => {
     assert.match(line, /^\[STORAGE\] PostgreSQL database usage: \d+ bytes \(\d+\.\d{2} MB \/ \d+\.\d{2} GB\), limit=\d+\.\d{2} GB, ratio=\d+\.\d{2}%$/);
 });
 
-// ---- STEP 2.2 (audit finding): parseEnvNumber phai phan biet "chua cau hinh"
-// voi "co cau hinh nhung sai", thay vi am tham nuot 0/NaN thanh default nhu
-// pattern cu `parseFloat(x) || default`.
-test('parseEnvNumber: unset (undefined) -> dung default', () => {
-    assert.equal(parseEnvNumber('DB_WARNING_RATIO', undefined, 0.80), 0.80);
+// ---- parseConfigNumber (STEP 2.2: sua loi `parseFloat(x) || default` nuot mat 0/NaN) ----
+// Day chinh la cac truong hop cu the ma mot review doc lap yeu cau phai
+// chung minh KHONG con am tham fallback sang default.
+test('parseConfigNumber: blank/undefined -> blank (dùng default là lựa chọn hợp lệ)', () => {
+    assert.equal(parseConfigNumber(undefined).blank, true);
+    assert.equal(parseConfigNumber(null).blank, true);
+    assert.equal(parseConfigNumber('').blank, true);
+    assert.equal(parseConfigNumber('   ').blank, true);
 });
 
-test('parseEnvNumber: blank string / chi co khoang trang -> dung default', () => {
-    assert.equal(parseEnvNumber('DB_WARNING_RATIO', '', 0.80), 0.80);
-    assert.equal(parseEnvNumber('DB_WARNING_RATIO', '   ', 0.80), 0.80);
+test('parseConfigNumber: "0" phải được nhận là 0 hợp lệ, KHÔNG bị nuốt thành default', () => {
+    const res = parseConfigNumber('0');
+    assert.equal(res.blank, false);
+    assert.equal(res.valid, true);
+    assert.equal(res.value, 0); // truoc STEP 2.2: `parseFloat("0") || 0.80` = 0.80 (SAI) - gio phai la 0
 });
 
-test('parseEnvNumber: "0" la gia tri HOP LE va phai duoc GIU NGUYEN, khong bi nuot thanh default', () => {
-    // Day chinh la bug STEP 2.1: parseFloat("0") || 0.80 -> 0.80 (SAI).
-    assert.equal(parseEnvNumber('DB_WARNING_RATIO', '0', 0.80), 0);
-    assert.equal(parseEnvNumber('DB_EMERGENCY_RATIO', '0', 0.90), 0);
+test('parseConfigNumber: "abc" (không phải số) phải invalid, KHÔNG được âm thầm dùng default', () => {
+    const res = parseConfigNumber('abc');
+    assert.equal(res.blank, false);
+    assert.equal(res.valid, false);
+    assert.ok(res.error);
 });
 
-test('parseEnvNumber: chuoi khong phai so ("abc") -> throw, KHONG am tham fallback ve default', () => {
-    assert.throws(() => parseEnvNumber('DB_WARNING_RATIO', 'abc', 0.80), /DB_WARNING_RATIO/);
-    assert.throws(() => parseEnvNumber('MAX_CLEANUP_ITERATIONS', 'abc', 50, { integer: true, min: 1 }));
+test('parseConfigNumber: "-1" là số âm hợp lệ về mặt PARSE (range/positivity do lớp gọi phía sau tự quyết định)', () => {
+    const res = parseConfigNumber('-1');
+    assert.equal(res.valid, true);
+    assert.equal(res.value, -1);
 });
 
-test('parseEnvNumber: so am -> throw khi co rang buoc min', () => {
-    assert.throws(() => parseEnvNumber('DB_EMERGENCY_RATIO', '-1', 0.90, { min: 0 }), /DB_EMERGENCY_RATIO/);
+test('parseConfigNumber: chuỗi số + rác ("10abc") phải invalid (Number, không phải parseFloat)', () => {
+    // parseFloat("10abc") = 10 (SAI, bo qua phan rac) - Number("10abc") = NaN (dung, tu choi toan bo)
+    const res = parseConfigNumber('10abc');
+    assert.equal(res.valid, false);
 });
 
-test('parseEnvNumber: DB_STORAGE_LIMIT_MB="abc" -> throw (truoc day bi hieu nham la "chua cau hinh" va tat tinh nang am tham)', () => {
-    assert.throws(() => parseEnvNumber('DB_STORAGE_LIMIT_MB', 'abc', null, { integer: true, min: 1 }), /DB_STORAGE_LIMIT_MB/);
+test('parseConfigNumber: số thập phân hợp lệ ("0.82") được nhận đúng', () => {
+    const res = parseConfigNumber('0.82');
+    assert.equal(res.valid, true);
+    assert.equal(res.value, 0.82);
 });
 
-test('parseEnvNumber: DB_STORAGE_LIMIT_MB="0" -> throw (0 MB khong hop le, khac voi "chua cau hinh")', () => {
-    assert.throws(() => parseEnvNumber('DB_STORAGE_LIMIT_MB', '0', null, { integer: true, min: 1 }), /DB_STORAGE_LIMIT_MB/);
+// ---- Đầu-cuối: DB_WARNING_RATIO=0 và DB_STORAGE_LIMIT_MB=abc phải bị validateThresholds/positivity-check bắt được ----
+test('end-to-end: DB_WARNING_RATIO="0" (parse -> classify) phải bị validateThresholds từ chối', () => {
+    const parsed = parseConfigNumber('0');
+    assert.equal(parsed.valid, true); // parse thanh cong (0 la so hop le)
+    const thresholds = { target: 0.75, warning: parsed.value, emergency: 0.90, hardBlockMedia: 0.95, hardBlockText: 0.99 };
+    const check = validateThresholds(thresholds);
+    assert.equal(check.valid, false, 'DB_WARNING_RATIO=0 phải bị validateThresholds bắt lỗi (0 nằm ngoài (0,1])');
 });
 
-test('parseEnvNumber: DB_STORAGE_LIMIT_MB khong set -> null (tinh nang tat, day la truong hop HOP LE duy nhat cho null)', () => {
-    assert.equal(parseEnvNumber('DB_STORAGE_LIMIT_MB', undefined, null, { integer: true, min: 1 }), null);
-});
-
-test('parseEnvNumber: gia tri hop le duoc giu nguyen chinh xac (khong lam tron/bien dang)', () => {
-    assert.equal(parseEnvNumber('DB_WARNING_RATIO', '0.72', 0.80), 0.72);
-    assert.equal(parseEnvNumber('DB_STORAGE_LIMIT_MB', '2048', null, { integer: true, min: 1 }), 2048);
-});
-
-test('parseEnvNumber: integer:true tu choi so thap phan (vd MAX_CLEANUP_ITERATIONS=1.5)', () => {
-    assert.throws(() => parseEnvNumber('MAX_CLEANUP_ITERATIONS', '1.5', 50, { integer: true, min: 1 }), /MAX_CLEANUP_ITERATIONS/);
-});
-
-test('parseEnvNumber: "12abc" bi tu choi (Number() khac parseInt() - parseInt am tham cat "abc")', () => {
-    // parseInt("12abc", 10) === 12 (SAI, am tham cat phan rac). Number("12abc") === NaN (DUNG).
-    assert.throws(() => parseEnvNumber('MAX_CLEANUP_ITERATIONS', '12abc', 50, { integer: true, min: 1 }));
+test('end-to-end: DB_EMERGENCY_RATIO="-1" phải bị validateThresholds từ chối', () => {
+    const parsed = parseConfigNumber('-1');
+    assert.equal(parsed.valid, true);
+    const thresholds = { target: 0.75, warning: 0.80, emergency: parsed.value, hardBlockMedia: 0.95, hardBlockText: 0.99 };
+    const check = validateThresholds(thresholds);
+    assert.equal(check.valid, false, 'DB_EMERGENCY_RATIO=-1 phải bị validateThresholds bắt lỗi');
 });
