@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node server.js",
-    "test": "node --test test/storage-policy.test.js",
+    "test": "node --test test/storage-policy.test.js test/input-validation.test.js test/rate-limit.test.js test/security-headers.test.js test/performance.test.js test/attachment-state.test.js",
     "test:integration": "node --test test/*.integration.test.js"
   },
   "dependencies": {

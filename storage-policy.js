@@ -14,6 +14,53 @@
 // Postgres that, KHONG can bien moi truong nao, va KHONG dung production DB.
 // ===================================================================
 
+// STEP 2.2 (audit finding): phan tich 1 bien moi truong dang so (ratio,
+// integer, byte-limit...) THEO DUNG 3 TRUONG HOP, thay vi pattern cu
+// `parseFloat(process.env.X) || default` / `parseInt(process.env.X) || default`
+// von lam "nuot" am tham moi gia tri falsy (0, NaN do go sai chinh ta) thanh
+// default ma KHONG AI BIET:
+//   1) khong cau hinh (undefined/null) hoac chuoi rong/blank sau trim()
+//        -> dung defaultValue (co the la null, vd DB_STORAGE_LIMIT_MB tat tinh nang)
+//   2) co cau hinh nhung KHONG PHAI so hop le (vd "abc", "12abc")
+//        -> throw Error (KHONG am tham fallback) de server.js fail-fast
+//   3) co cau hinh, la so hop le, nhung ngoai rang buoc (opts.min/opts.max/
+//      opts.integer) - vd DB_STORAGE_LIMIT_MB=0 hoac so am
+//        -> throw Error
+//   4) hop le -> tra ve gia tri da parse (khong con di qua default nua, ke
+//      ca khi gia tri that su la 0 - day chinh la loi STEP 2.1 chua sua: 0
+//      la mot gia tri HOP LE can duoc giu nguyen, khong duoc coi la "chua
+//      cau hinh").
+// Ham nay KHONG console.error/process.exit - giu file nay thuan tuy/de test,
+// giong dung nguyen tac cua validateThresholds() o tren. server.js se bat
+// Error va tu quyet dinh fail-fast (giong pattern JWT_SECRET/ADMIN_PASSWORD
+// da co san).
+function parseEnvNumber(name, rawValue, defaultValue, opts = {}) {
+    const { integer = false, min = null, max = null } = opts;
+
+    if (rawValue === undefined || rawValue === null || String(rawValue).trim() === '') {
+        return defaultValue;
+    }
+
+    const trimmed = String(rawValue).trim();
+    // Dung Number(), KHONG dung parseInt/parseFloat truc tiep de kiem tra hop
+    // le: parseInt("12abc", 10) tra ve 12 (am tham bo phan "abc"), trong khi
+    // Number("12abc") tra ve NaN - chinh xac hon cho muc dich validation.
+    const strictValue = Number(trimmed);
+    if (!Number.isFinite(strictValue)) {
+        throw new Error(`${name}="${rawValue}" không phải là số hợp lệ`);
+    }
+    if (integer && !Number.isInteger(strictValue)) {
+        throw new Error(`${name}="${rawValue}" phải là số nguyên`);
+    }
+    if (min !== null && strictValue < min) {
+        throw new Error(`${name}="${rawValue}" phải >= ${min}`);
+    }
+    if (max !== null && strictValue > max) {
+        throw new Error(`${name}="${rawValue}" phải <= ${max}`);
+    }
+    return strictValue;
+}
+
 // Kiem tra quan he logic giua cac nguong (STEP 2.1 §22). Tra ve danh sach loi
 // (rong = hop le). Khong nem exception o day - de server.js tu quyet dinh
 // fail-fast (process.exit) hay khong, giu file nay thuan tuy/de test.
@@ -80,35 +127,4 @@ function formatDiagnostic(prefix, usedMB, limitMB, ratio) {
         `limit=${limitGB.toFixed(2)} GB, ratio=${(ratio * 100).toFixed(2)}%`;
 }
 
-// ===================================================================
-// STEP 2.2 (phat hien boi review doc lap): parse bien moi truong SO dung cach.
-//
-// Loi thuc te truoc day: server.js dung pattern `parseFloat(process.env.X) || default`.
-// Trong JS, 0 va NaN deu la falsy, nen pattern nay VO TINH nuot mat 2 truong
-// hop nguy hiem ma khong ai biet:
-//   X=0    -> parseFloat("0")=0   -> 0 || default   -> AM THAM thanh default (KHONG phai 0 nhu da go)
-//   X=abc  -> parseFloat("abc")=NaN -> NaN || default -> AM THAM thanh default (KHONG bao loi gi ca)
-// Nguoi van hanh go SAI cau hinh (vd go nham "0" hoac go nham chu) se KHONG
-// BAO GIO thay loi - server cu am tham chay voi default nhu khong co chuyen
-// gi, dung la vi pham STEP 2.1 §22 "fail fast, khong silently run voi nguong
-// khong an toan" ma STEP 2.1 tuong da sua (validateThresholds) nhung chua sua
-// triet de, vi validateThresholds KHONG BAO GIO thay duoc gia tri that (0/NaN)
-// - no chi thay gia tri default da bi `||` thay the truoc do.
-//
-// Ham nay phan biet RO RANG 3 truong hop, PURE (khong doc process.env, de test):
-//   blank/undefined  -> { blank: true }                        (dung default - day la lua chon HOP LE)
-//   khong phai so    -> { blank: false, valid: false }          (FAIL FAST - KHONG am tham dung default)
-//   la so hop le      -> { blank: false, valid: true, value }   (dung DUNG gia tri nay, ke ca 0 hoac am - de buoc validate/range-check phia sau tu quyet dinh co hop le khong)
-// ===================================================================
-function parseConfigNumber(raw) {
-    if (raw === undefined || raw === null || String(raw).trim() === '') {
-        return { blank: true, valid: true, value: undefined };
-    }
-    const value = Number(raw); // Number("0")=0 (finite, hop le) khac parseFloat("")=NaN - khong dung parseFloat vi no doc "10abc" thanh 10 ma khong bao loi
-    if (!Number.isFinite(value)) {
-        return { blank: false, valid: false, value: undefined, error: `giá trị "${raw}" không phải là số hợp lệ` };
-    }
-    return { blank: false, valid: true, value };
-}
-
-module.exports = { validateThresholds, classifyUsage, formatDiagnostic, parseConfigNumber };
+module.exports = { validateThresholds, classifyUsage, formatDiagnostic, parseEnvNumber };
