@@ -189,6 +189,74 @@ input:focus{ outline:none; border-color: var(--teal); }
   font-size:.8rem; color:var(--text-dim); font-family:var(--mono);
 }
 
+/* ---------- attachment card (preview LOCAL truoc khi gui - xem app.js) ---------- */
+.attachment-card{
+  display:flex; align-items:center; gap:12px; padding:10px 14px;
+  background: var(--bg-elev); border-top:1px solid var(--border);
+}
+.attachment-preview-wrap{
+  position:relative; width:64px; height:64px; flex:0 0 auto;
+  border-radius:10px; overflow:hidden; background: var(--bg-panel);
+  border:1px solid var(--border);
+}
+.attachment-preview-img{
+  width:100%; height:100%; object-fit:cover; display:block;
+  /* Mo -> net: blur trong luc dang xu ly/tai len (CONVERTING/UPLOADING/
+     READY_TO_UPLOAD - chua duoc server xac nhan), net khi COMPLETED. */
+  filter: blur(8px);
+  transition: filter .3s ease;
+}
+.attachment-preview-img.sharp{ filter: blur(0); }
+.attachment-placeholder{
+  width:100%; height:100%; display:flex; align-items:center; justify-content:center;
+  background: var(--bg-panel);
+}
+.attachment-placeholder-label{
+  font-family:var(--mono); font-size:.62rem; font-weight:700; letter-spacing:.4px;
+  color: var(--text-dim); border:1px solid var(--border); border-radius:6px; padding:3px 6px;
+}
+.attachment-overlay{
+  position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:2px; background: rgba(8,16,15,0.55);
+}
+.attachment-spinner{ width:30px; height:30px; }
+/* CONVERTING: khong biet % thuc (heic2any khong bao progress) - dung spinner
+   quay VO DINH thay vi bia so lieu gia (yeu cau: "This is preferable to
+   inventing fake conversion percentages"). */
+.attachment-spinner.indeterminate{ animation: attachment-spin 1s linear infinite; }
+.attachment-spinner.indeterminate .attachment-spinner-arc{ stroke-dashoffset: 94.2; } /* ~75% cung, quay tron tao cam giac spinner */
+@keyframes attachment-spin{ to{ transform: rotate(360deg); } }
+.attachment-spinner-track{ fill:none; stroke: rgba(255,255,255,.28); stroke-width:4; }
+.attachment-spinner-arc{
+  fill:none; stroke: var(--teal); stroke-width:4; stroke-linecap:round;
+  transform-origin:50% 50%; transform:rotate(-90deg);
+  stroke-dasharray:125.6; /* 2*pi*20 */
+  stroke-dashoffset:125.6; /* 0% mac dinh */
+  transition: stroke-dashoffset .2s linear;
+}
+.attachment-progress-text{
+  font-family:var(--mono); font-size:.62rem; font-weight:700; color:#fff;
+  text-shadow: 0 1px 2px rgba(0,0,0,.6);
+}
+.attachment-remove{
+  position:absolute; top:2px; right:2px; width:24px; height:24px; border-radius:50%;
+  background: rgba(8,16,15,0.75); border:none; color:#fff; font-size:.7rem; line-height:1;
+  display:flex; align-items:center; justify-content:center; cursor:pointer;
+  padding:0; touch-action:manipulation;
+}
+.attachment-remove:active{ background: rgba(8,16,15,0.95); }
+.attachment-info{ display:flex; flex-direction:column; gap:2px; min-width:0; flex:1; }
+.attachment-filename{
+  font-family:var(--mono); font-size:.8rem; color:var(--text);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.attachment-status{ font-size:.72rem; color:var(--text-dim); }
+.attachment-status.is-error{ color: var(--danger); }
+/* FAILED + con file goc de thu lai - bam vao card se goi startAttachmentProcessing()
+   lai (xem app.js) - danh dau ro rang la co the bam duoc. */
+.attachment-card.is-retryable{ cursor:pointer; }
+.attachment-card.is-retryable:active .attachment-preview-wrap{ opacity:.85; }
+
 /* ---------- mention dropdown ---------- */
 .mention-dropdown{
   position:sticky; bottom:56px; margin:0 12px; background: var(--bg-elev);
@@ -217,6 +285,76 @@ input:focus{ outline:none; border-color: var(--teal); }
 .btn-approve{ background: var(--teal); color:#04201c; }
 .btn-revoke{ background: var(--bg-elev); color: var(--amber); border:1px solid var(--amber) !important; }
 .btn-delete{ background: var(--bg-elev); color: var(--danger); border:1px solid var(--danger) !important; }
+
+/* ---------- context menu (right-click / hold tren bong bong chat) ---------- */
+.context-menu{
+  position:fixed; z-index:60; background: var(--bg-elev); border:1px solid var(--border);
+  border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,.5); overflow:hidden; min-width:160px;
+}
+.context-menu-item{
+  display:block; width:100%; text-align:left; padding:11px 16px; background:transparent; border:none;
+  color:var(--text); font-family:var(--sans); font-size:.88rem; cursor:pointer;
+}
+.context-menu-item + .context-menu-item{ border-top:1px solid var(--border); }
+.context-menu-item:hover{ background: var(--bg-panel); }
+.context-menu-item.danger{ color: var(--danger); }
+
+/* ---------- reply: trich dan trong bubble + thanh preview o composer ---------- */
+.reply-quote{
+  border-left:3px solid var(--teal); padding:4px 8px; margin-bottom:6px; border-radius:4px;
+  background: rgba(255,255,255,0.04); font-size:.82rem;
+}
+.reply-quote.clickable{ cursor:pointer; }
+.reply-quote.clickable:hover{ background: rgba(255,255,255,0.09); }
+.reply-quote-sender{ color: var(--teal); font-weight:600; display:block; margin-bottom:1px; }
+.reply-quote-text{
+  color: var(--text-dim); display:block; white-space:pre-wrap; word-break:break-word;
+  max-height:4.4em; overflow:hidden;
+}
+.reply-preview{
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:8px 14px; background: var(--bg-elev); border-top:1px solid var(--border);
+  border-left:3px solid var(--teal); font-size:.82rem;
+}
+.reply-preview-info{ display:flex; flex-direction:column; overflow:hidden; }
+.reply-preview-label{ color: var(--teal); font-size:.66rem; font-family:var(--mono); }
+.reply-preview-sender{ color: var(--text); font-weight:600; font-size:.8rem; }
+.reply-preview-text{
+  color: var(--text-dim); font-size:.78rem; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; max-width:70vw;
+}
+
+@keyframes flashHighlight{
+  0%{ background:rgba(20,224,196,0.28); border-radius:10px; }
+  100%{ background:transparent; }
+}
+.flash-highlight{ animation: flashHighlight 1.2s ease; }
+
+/* ---------- video: chi hien preview, double-click de xem lon ---------- */
+.video-preview-wrap{ position:relative; display:inline-block; cursor:pointer; margin-top:2px; }
+.video-preview-wrap video{
+  max-width:260px; max-height:320px; border-radius:10px; display:block; pointer-events:none; background:#000;
+}
+.video-play-icon{
+  position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+  width:46px; height:46px; border-radius:50%; background:rgba(0,0,0,.55); color:#fff;
+  display:flex; align-items:center; justify-content:center; font-size:1.2rem; pointer-events:none;
+}
+.bubble img{ cursor: zoom-in; }
+
+/* ---------- media lightbox (xem anh/video giua man hinh) ---------- */
+.media-lightbox{
+  position:fixed; inset:0; background:rgba(0,0,0,.9); z-index:80;
+  display:flex; align-items:center; justify-content:center; padding:24px;
+}
+.lightbox-content{ max-width:92vw; max-height:88vh; display:flex; }
+.lightbox-content img, .lightbox-content video{
+  max-width:92vw; max-height:88vh; border-radius:8px; object-fit:contain; display:block;
+}
+.lightbox-close{
+  position:fixed; top:16px; right:16px; width:40px; height:40px; border-radius:50%;
+  background: var(--bg-elev); border:1px solid var(--border); color:var(--text); font-size:1.1rem; cursor:pointer; z-index:81;
+}
 
 /* ---------- toast ---------- */
 .toast{

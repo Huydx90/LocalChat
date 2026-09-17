@@ -73,6 +73,41 @@
   <div id="mention-dropdown" class="mention-dropdown hidden"></div>
   <div id="emoji-picker" class="emoji-picker hidden"></div>
 
+  <div id="reply-preview" class="reply-preview hidden">
+    <div class="reply-preview-info">
+      <span class="reply-preview-label">Đang trả lời</span>
+      <span id="reply-preview-sender" class="reply-preview-sender"></span>
+      <span id="reply-preview-text" class="reply-preview-text"></span>
+    </div>
+    <button type="button" id="btn-cancel-reply" class="btn-ghost small">Hủy</button>
+  </div>
+
+  <!-- Attachment card: preview LOCAL (chua gui cho ai) cua 1 file dang duoc
+       xu ly/tai len (anh/video/HEIC) - xem attachment-state.js + app.js
+       renderAttachmentPreview(). Chi hien khi co dinh kem dang xu ly - nam
+       TREN composer, giong reply-preview, de khong che nut Gui/input tren
+       man hinh nho (mobile). -->
+  <div id="attachment-card" class="attachment-card hidden">
+    <div class="attachment-preview-wrap">
+      <img id="attachment-preview-img" class="attachment-preview-img hidden" alt="">
+      <div id="attachment-placeholder" class="attachment-placeholder hidden">
+        <span id="attachment-placeholder-label" class="attachment-placeholder-label"></span>
+      </div>
+      <div id="attachment-overlay" class="attachment-overlay hidden">
+        <svg class="attachment-spinner" id="attachment-spinner" viewBox="0 0 48 48" aria-hidden="true">
+          <circle class="attachment-spinner-track" cx="24" cy="24" r="20"></circle>
+          <circle id="attachment-spinner-arc" class="attachment-spinner-arc" cx="24" cy="24" r="20"></circle>
+        </svg>
+        <span id="attachment-progress-text" class="attachment-progress-text"></span>
+      </div>
+      <button type="button" id="btn-remove-attachment" class="attachment-remove" title="Xóa đính kèm">✕</button>
+    </div>
+    <div class="attachment-info">
+      <span id="attachment-filename" class="attachment-filename"></span>
+      <span id="attachment-status" class="attachment-status"></span>
+    </div>
+  </div>
+
   <form id="form-send" class="composer">
     <button type="button" id="btn-emoji" class="btn-icon" title="Gửi cảm xúc">😊</button>
     <button type="button" id="btn-attach" class="btn-icon" title="Gửi ảnh/video">📎</button>
@@ -80,11 +115,16 @@
     <input type="text" id="text-input" placeholder="Nhập tin nhắn... (dùng @ để tag)" autocomplete="off">
     <button type="submit" class="btn-primary btn-send">Gửi</button>
   </form>
-  <div id="upload-preview" class="upload-preview hidden">
-    <span id="upload-preview-name"></span>
-    <button type="button" id="btn-cancel-upload" class="btn-ghost small">Hủy</button>
-  </div>
 </section>
+
+<!-- ===== Submenu chuột phải / giữ trên bong bóng chat (Trả lời / Xóa) ===== -->
+<div id="context-menu" class="context-menu hidden"></div>
+
+<!-- ===== Lightbox xem ảnh/video phóng to giữa màn hình ===== -->
+<div id="media-lightbox" class="media-lightbox hidden">
+  <button type="button" id="btn-lightbox-close" class="lightbox-close" title="Đóng">✕</button>
+  <div id="lightbox-content" class="lightbox-content"></div>
+</div>
 
 <!-- ===== ADMIN PANEL ===== -->
 <section id="view-admin" class="view hidden">
@@ -99,10 +139,13 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<!-- HEIC/HEIF -> JPEG o phia client (uu tien - xem app.js prepareImageForUpload()).
-     Neu CDN khong tai duoc (offline/chan mang), app.js tu phat hien window.heic2any
-     khong ton tai va rot xuong gui HEIC goc len server de server tu convert. -->
+<!-- HEIC/HEIF -> JPEG o phia client (uu tien - xem app.js convertHeicClientSide()).
+     Neu CDN khong tai duoc (offline/chan mang) hoac bi CSP chan (vd 'unsafe-eval'
+     can cho new Function() noi bo cua thu vien), app.js tu phat hien that bai/
+     timeout va rot xuong gui HEIC goc len server de server tu convert - KHONG
+     bao gio noi CSP cua app nay len de "sua" loi cua 1 thu vien ben thu 3. -->
 <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
+<script src="/attachment-state.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
