@@ -81,6 +81,12 @@
     // Trang thai KHOI TAO cho 1 attachment moi (chua gan file nao - IDLE).
     // "meta" chua thong tin hien thi (ten file, kich thuoc, loai) va "progress"
     // (0-100, chi co y nghia trong giai doan UPLOADING - null cac giai doan khac).
+    // "previewGeneration" (FIX #2 §10): dem so lan MOT THAO TAC PREVIEW MOI
+    // duoc bat dau cho CUNG 1 attachment (vd: probe hien thi HEIC goc, roi sau
+    // do preview JPEG da convert thay the no) - dung de phat hien va bo qua
+    // ket qua "cu" cua 1 thao tac preview bat dong bo DA BI THAY THE boi 1
+    // thao tac preview MOI HON cho CHINH attachment nay (khac voi "id", von
+    // chi phat hien khi CA ATTACHMENT bi thay the/huy hoan toan).
     function createAttachmentState() {
         return {
             id: null,
@@ -88,6 +94,7 @@
             file: null,          // File/Blob SE duoc upload (sau khi convert/nen xong)
             previewUrl: null,    // object URL cho local preview (null neu dung placeholder)
             hasSharpPreview: false, // true neu previewUrl la anh THAT SU decode duoc (khong phai placeholder)
+            previewGeneration: 0, // xem giai thich o tren (FIX #2 §10)
             kind: null,          // 'image' | 'video' | 'heic'
             progress: null,      // 0-100 khi UPLOADING, null cac giai doan khac
             error: null,         // message loi hien thi cho nguoi dung (khi FAILED)
@@ -123,12 +130,39 @@
         return Object.assign({}, attachmentState, patch || {});
     }
 
+    // FIX #2 §10: bat dau 1 "the he" (generation) preview MOI cho attachment
+    // hien tai - TRA VE OBJECT MOI voi previewGeneration da tang 1, VA gia tri
+    // generation moi do (de noi goi luu lai, dung cho isPreviewStillCurrent()
+    // sau nay). Goi ham nay NGAY TRUOC KHI bat dau 1 thao tac preview bat dong
+    // bo (tao object URL + cho load/convert) - bat ky thao tac preview nao
+    // dang cho ket qua tu TRUOC do se tu dong "lac hau" (generation cu hon).
+    function bumpPreviewGeneration(attachmentState) {
+        if (!attachmentState) throw new Error('attachmentState is required');
+        const nextGeneration = (attachmentState.previewGeneration || 0) + 1;
+        const next = updateAttachment(attachmentState, { previewGeneration: nextGeneration });
+        return { state: next, generation: nextGeneration };
+    }
+
     // True neu "resultAttachmentId" KHONG con khop voi attachment DANG HOAT
     // DONG ("currentAttachmentId") - dung de 1 callback bat dong bo (convert
     // xong / upload progress / upload xong) tu kiem tra TRUOC KHI cap nhat DOM/
     // state, tranh 1 thao tac CU ghi de len 1 attachment MOI hon (task §15).
     function isStaleAttachmentResult(currentAttachmentId, resultAttachmentId) {
         return currentAttachmentId !== resultAttachmentId;
+    }
+
+    // FIX #2 §10/§11: kiem tra KET HOP ca 2 dieu kien truoc khi 1 thao tac
+    // PREVIEW bat dong bo (probe HEIC, preview JPEG da convert...) duoc phep
+    // cap nhat DOM/state - "attachmentId" van con la attachment dang hoat dong
+    // (khac attachment hoan toan - vd nguoi dung da xoa/chon file khac), VA
+    // "previewGeneration" van la lan preview MOI NHAT cho CHINH attachment do
+    // (khac lan preview cu hon CUNG 1 attachment - vd HEIC probe bi preview
+    // JPEG da convert "vuot mat"). Ca 2 dieu kien DEU phai dung thi ket qua
+    // preview moi duoc coi la "con hieu luc".
+    function isPreviewStillCurrent(currentAttachmentState, resultAttachmentId, resultPreviewGeneration) {
+        if (!currentAttachmentState) return false;
+        if (isStaleAttachmentResult(currentAttachmentState.id, resultAttachmentId)) return false;
+        return currentAttachmentState.previewGeneration === resultPreviewGeneration;
     }
 
     var AttachmentState = {
@@ -139,7 +173,9 @@
         createAttachmentState: createAttachmentState,
         transition: transition,
         updateAttachment: updateAttachment,
+        bumpPreviewGeneration: bumpPreviewGeneration,
         isStaleAttachmentResult: isStaleAttachmentResult,
+        isPreviewStillCurrent: isPreviewStillCurrent,
     };
 
     if (typeof module !== 'undefined' && module.exports) {

@@ -807,6 +807,13 @@ const attachmentProgressText = $('#attachment-progress-text');
 const attachmentFilenameEl = $('#attachment-filename');
 const attachmentStatusEl = $('#attachment-status');
 const SPINNER_CIRCUMFERENCE = 2 * Math.PI * 20; // r=20, xem SVG trong index.html
+// FIX #2 §5/§6: thoi gian (ms) GIU card dinh kem hien thi o trang thai
+// COMPLETED truoc khi an di - PHAI khop (hoac hoi lon hon) thoi luong CSS
+// transition "filter/transform" cua ".attachment-preview-img" (350ms, xem
+// style.css) de nguoi dung THAT SU nhin thay hieu ung mo->net, khong bi "cat
+// cut" giua chung. Day KHONG phai "artificial delay" vo nghia - no ton tai
+// CHINH XAC de trinh duyet co du thoi gian hoan tat 1 hieu ung da bat dau.
+const ATTACHMENT_COMPLETED_VISIBLE_MS = 400;
 
 // Sau lan HEIC dau tien that bai/timeout trong PHIEN NAY, khong thu heic2any
 // nua cho cac file HEIC tiep theo (rot thang xuong server fallback ngay) -
@@ -899,12 +906,22 @@ function renderAttachmentPreview() {
 // moi co the, hau het trinh duyet khac thi khong) - thu 1 cach "graceful",
 // that bai thi im lang dung placeholder, KHONG bao loi/anh huong luong chinh
 // (yeu cau §7).
+//
+// FIX #2 §9-§12: bat 1 "the he" preview MOI (bumpPreviewGeneration) NGAY
+// TRUOC KHI bat dau probe bat dong bo - neu 1 preview KHAC (vd JPEG da convert
+// tu heic2any) duoc dat cho CUNG attachment nay TRUOC KHI probe nay hoan tat,
+// generation cua probe se "lac hau" va ket qua cua no bi bo qua (khong ghi de
+// len preview moi hon) - xem isPreviewStillCurrent() trong attachment-state.js.
 function attachLocalPreviewIfPossible(attachmentId, file) {
+  const bump = AttachmentState.bumpPreviewGeneration(state.attachment);
+  state.attachment = bump.state;
+  const myGeneration = bump.generation;
+
   const objectUrl = URL.createObjectURL(file);
   const probe = new Image();
   probe.onload = () => {
-    if (AttachmentState.isStaleAttachmentResult(state.attachment.id, attachmentId)) {
-      URL.revokeObjectURL(objectUrl); // attachment da doi - khong con can nua
+    if (!AttachmentState.isPreviewStillCurrent(state.attachment, attachmentId, myGeneration)) {
+      URL.revokeObjectURL(objectUrl); // attachment da doi HOAC da co 1 preview moi hon - khong con can nua
       return;
     }
     revokeAttachmentPreviewUrl();
@@ -999,7 +1016,13 @@ async function startAttachmentProcessing(file) {
       const compact = await prepareImageForUpload(jpegFile);
       if (AttachmentState.isStaleAttachmentResult(state.attachment.id, id)) return;
       // Thay preview (co the dang la placeholder, vi trinh duyet khong tu doc
-      // duoc HEIC goc) bang preview SAC NET cua ket qua JPEG da convert.
+      // duoc HEIC goc) bang preview SAC NET cua ket qua JPEG da convert. Bat 1
+      // "the he" preview MOI (§9-§12) TRUOC KHI dat previewUrl - danh dau moi
+      // preview cu hon (vd probe HEIC goc dang cho o attachLocalPreviewIfPossible)
+      // la "lac hau", tranh no ghi de nguoc lai preview JPEG nay neu no hoan
+      // tat tre (race condition - dung y chinh cua FIX #2 issue #9).
+      const bump = AttachmentState.bumpPreviewGeneration(state.attachment);
+      state.attachment = bump.state;
       revokeAttachmentPreviewUrl();
       const previewUrl = URL.createObjectURL(compact);
       patchAttachment({ previewUrl });
@@ -1167,12 +1190,42 @@ $('#form-send').addEventListener('submit', async (e) => {
         },
       });
       if (AttachmentState.isStaleAttachmentResult(state.attachment.id, attachmentId)) return; // da bi huy/thay the giua chung
-      if (data && data.message) await appendMessage(data.message, true);
-      // Hoan tat: COMPLETED (net anh trong khoanh khac ngan) roi ve IDLE (an card).
-      revokeAttachmentPreviewUrl();
+
+      // FIX #2 §4/§5/§8: truoc day COMPLETED -> IDLE xay ra TRONG CUNG 1
+      // duong thuc thi dong bo (khong co await xen giua), nen trinh duyet
+      // KHONG BAO GIO co co hoi VE (render) trang thai COMPLETED (anh net) ra
+      // man hinh truoc khi card bi an di - hieu ung mo->net khong bao gio
+      // duoc nguoi dung nhin thay. Sua: dat COMPLETED (kich hoat CSS transition
+      // filter/transform - xem style.css), cho it nhat 1 khung hinh THAT SU
+      // duoc ve (2 lan requestAnimationFrame long nhau - dung ky thuat chuan de
+      // dam bao "sau khung hinh KE TIEP", khong chi la "truoc khung hinh nay"),
+      // roi moi lam cac viec con lai. KHONG revoke previewUrl o day nua - object
+      // URL PHAI con song trong luc card dang hien thi & chay hieu ung.
       setAttachmentPhase(PHASES.COMPLETED);
-      setAttachmentPhase(PHASES.IDLE);
-      fileInput.value = '';
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+      // Tin nhan that (bubble rieng trong khung chat chinh) co the render ngay
+      // tu day - day la 1 DOM element HOAN TOAN doc lap voi card dinh kem tam
+      // thoi, khong can cho het hieu ung CSS cua card moi render tin nhan.
+      if (data && data.message) await appendMessage(data.message, true);
+
+      // Giu card dinh kem hien thi DU LAU de hieu ung CSS mo->net (350ms, xem
+      // ".attachment-preview-img" trong style.css) THAT SU choi het truoc khi
+      // an card di - neu an ngay, hieu ung bi "cat cut" giua chung.
+      if (!AttachmentState.isStaleAttachmentResult(state.attachment.id, attachmentId)) {
+        await new Promise((resolve) => setTimeout(resolve, ATTACHMENT_COMPLETED_VISIBLE_MS));
+      }
+      if (!AttachmentState.isStaleAttachmentResult(state.attachment.id, attachmentId)) {
+        // Van la attachment nay (nguoi dung khong bam Xoa/chon file khac trong
+        // luc cho hieu ung) - don dep: giai phong preview URL roi ve IDLE.
+        revokeAttachmentPreviewUrl();
+        setAttachmentPhase(PHASES.IDLE);
+        fileInput.value = '';
+      }
+      // Neu DA stale (nguoi dung tu thao tac trong luc cho), cancelAttachment()
+      // tu luc do da tu lo phan don dep (revoke URL/an card) cho attachment
+      // NAY roi - khong lam gi them o day de tranh dam vao attachment MOI.
+
       state.replyTarget = null;
       renderReplyPreviewBar();
       hideMentionDropdown();

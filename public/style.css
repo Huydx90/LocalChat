@@ -189,37 +189,44 @@ input:focus{ outline:none; border-color: var(--teal); }
   font-size:.8rem; color:var(--text-dim); font-family:var(--mono);
 }
 
-/* ---------- attachment card (preview LOCAL truoc khi gui - xem app.js) ---------- */
+/* ---------- attachment card (preview LOCAL truoc khi gui - xem app.js) ----------
+   FIX #2 (2026-09-14): preview truoc day chi 64x64 (qua nho, giong icon hon la
+   preview that su) - doi sang 1 panel anh thuc su, ty le 4:3, co gioi han
+   max-width de khong pha layout composer tren man hinh nho (§2/§15). */
 .attachment-card{
-  display:flex; align-items:center; gap:12px; padding:10px 14px;
+  display:flex; flex-direction:column; gap:8px; padding:12px 14px;
   background: var(--bg-elev); border-top:1px solid var(--border);
 }
 .attachment-preview-wrap{
-  position:relative; width:64px; height:64px; flex:0 0 auto;
-  border-radius:10px; overflow:hidden; background: var(--bg-panel);
+  position:relative; width:100%; max-width:260px;
+  aspect-ratio: 4 / 3; /* ~260x195 o desktop, tu thu nho theo chieu rong tren mobile - van trong khoang 150-200px cao yeu cau */
+  border-radius:12px; overflow:hidden; background: var(--bg-panel);
   border:1px solid var(--border);
 }
 .attachment-preview-img{
   width:100%; height:100%; object-fit:cover; display:block;
   /* Mo -> net: blur trong luc dang xu ly/tai len (CONVERTING/UPLOADING/
-     READY_TO_UPLOAD - chua duoc server xac nhan), net khi COMPLETED. */
+     READY_TO_UPLOAD - chua duoc server xac nhan), net khi COMPLETED. Scale nhe
+     (1.03 -> 1) giup an di vien mo cua filter blur o canh anh trong luc dang
+     mo (§6: "If using scale to hide blur edges"). */
   filter: blur(8px);
-  transition: filter .3s ease;
+  transform: scale(1.03);
+  transition: filter 350ms ease, transform 350ms ease;
 }
-.attachment-preview-img.sharp{ filter: blur(0); }
+.attachment-preview-img.sharp{ filter: blur(0); transform: scale(1); }
 .attachment-placeholder{
   width:100%; height:100%; display:flex; align-items:center; justify-content:center;
   background: var(--bg-panel);
 }
 .attachment-placeholder-label{
-  font-family:var(--mono); font-size:.62rem; font-weight:700; letter-spacing:.4px;
-  color: var(--text-dim); border:1px solid var(--border); border-radius:6px; padding:3px 6px;
+  font-family:var(--mono); font-size:.85rem; font-weight:700; letter-spacing:.5px;
+  color: var(--text-dim); border:1px solid var(--border); border-radius:8px; padding:6px 12px;
 }
 .attachment-overlay{
   position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
-  gap:2px; background: rgba(8,16,15,0.55);
+  gap:6px; background: rgba(8,16,15,0.55);
 }
-.attachment-spinner{ width:30px; height:30px; }
+.attachment-spinner{ width:56px; height:56px; }
 /* CONVERTING: khong biet % thuc (heic2any khong bao progress) - dung spinner
    quay VO DINH thay vi bia so lieu gia (yeu cau: "This is preferable to
    inventing fake conversion percentages"). */
@@ -235,17 +242,17 @@ input:focus{ outline:none; border-color: var(--teal); }
   transition: stroke-dashoffset .2s linear;
 }
 .attachment-progress-text{
-  font-family:var(--mono); font-size:.62rem; font-weight:700; color:#fff;
+  font-family:var(--mono); font-size:.95rem; font-weight:700; color:#fff;
   text-shadow: 0 1px 2px rgba(0,0,0,.6);
 }
 .attachment-remove{
-  position:absolute; top:2px; right:2px; width:24px; height:24px; border-radius:50%;
-  background: rgba(8,16,15,0.75); border:none; color:#fff; font-size:.7rem; line-height:1;
+  position:absolute; top:6px; right:6px; width:28px; height:28px; border-radius:50%;
+  background: rgba(8,16,15,0.75); border:none; color:#fff; font-size:.8rem; line-height:1;
   display:flex; align-items:center; justify-content:center; cursor:pointer;
   padding:0; touch-action:manipulation;
 }
 .attachment-remove:active{ background: rgba(8,16,15,0.95); }
-.attachment-info{ display:flex; flex-direction:column; gap:2px; min-width:0; flex:1; }
+.attachment-info{ display:flex; flex-direction:column; gap:2px; min-width:0; max-width:260px; }
 .attachment-filename{
   font-family:var(--mono); font-size:.8rem; color:var(--text);
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
@@ -256,6 +263,12 @@ input:focus{ outline:none; border-color: var(--teal); }
    lai (xem app.js) - danh dau ro rang la co the bam duoc. */
 .attachment-card.is-retryable{ cursor:pointer; }
 .attachment-card.is-retryable:active .attachment-preview-wrap{ opacity:.85; }
+
+@media (max-width: 420px){
+  /* Mobile (§15): gioi han max-width theo chieu rong composer, khong bao gio
+     vuot man hinh - "min(100%, 240px)" thay vi 260px co dinh tren desktop. */
+  .attachment-preview-wrap, .attachment-info{ max-width: min(100%, 240px); }
+}
 
 /* ---------- mention dropdown ---------- */
 .mention-dropdown{
