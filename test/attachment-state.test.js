@@ -21,6 +21,7 @@ test('AttachmentState: createAttachmentState() tra ve trang thai IDLE ban dau du
     assert.equal(s.file, null);
     assert.equal(s.previewUrl, null);
     assert.equal(s.hasSharpPreview, false);
+    assert.equal(s.previewGeneration, 0);
     assert.equal(s.progress, null);
     assert.equal(s.error, null);
     assert.deepEqual(s.meta, { name: '', sizeBytes: 0 });
@@ -173,3 +174,69 @@ test('isStaleAttachmentResult: ket qua cua 1 attachment CU (da bi thay the) -> L
 test('isStaleAttachmentResult: attachment hien tai la null (da bi xoa/reset ve IDLE) -> moi ket qua cu deu la stale', () => {
     assert.equal(AttachmentState.isStaleAttachmentResult(null, 'att-A'), true);
 });
+
+// ---------------------------------------------------------------------
+// FIX #2 §9-§12 — preview generation token: chong callback preview CU (vd
+// probe hien thi HEIC goc) ghi de len preview MOI HON (vd JPEG da convert)
+// cho CUNG 1 attachment.
+// ---------------------------------------------------------------------
+
+test('bumpPreviewGeneration(): tang previewGeneration them 1 moi lan goi, tra ve ca state moi VA generation moi (khong mutate input)', () => {
+    const s0 = AttachmentState.createAttachmentState();
+    assert.equal(s0.previewGeneration, 0);
+    const { state: s1, generation: g1 } = AttachmentState.bumpPreviewGeneration(s0);
+    assert.equal(s0.previewGeneration, 0, 'state goc KHONG duoc bi mutate');
+    assert.equal(s1.previewGeneration, 1);
+    assert.equal(g1, 1);
+    const { state: s2, generation: g2 } = AttachmentState.bumpPreviewGeneration(s1);
+    assert.equal(s2.previewGeneration, 2);
+    assert.equal(g2, 2);
+});
+
+test('isPreviewStillCurrent(): TRUE khi ca attachmentId VA previewGeneration deu khop voi state hien tai', () => {
+    let s = AttachmentState.createAttachmentState();
+    s = AttachmentState.transition(s, PHASES.ATTACHED, { id: 'att-1' });
+    const { state: s2, generation: g1 } = AttachmentState.bumpPreviewGeneration(s);
+    assert.equal(AttachmentState.isPreviewStillCurrent(s2, 'att-1', g1), true);
+});
+
+test('isPreviewStillCurrent(): FALSE khi previewGeneration da lac hau (bi 1 preview MOI HON cho CUNG attachment vuot mat) - kich ban chinh cua task: HEIC probe cu vs JPEG da convert moi', () => {
+    // Mo phong CHINH XAC kich ban trong task:
+    //   attach HEIC -> previewGeneration=1 (bat dau probe hien thi HEIC goc)
+    //   heic2any thanh cong -> previewGeneration=2 (dat preview JPEG)
+    //   probe HEIC cu (generation=1) hoan tat SAU - phai bi BO QUA.
+    let s = AttachmentState.createAttachmentState();
+    s = AttachmentState.transition(s, PHASES.ATTACHED, { id: 'att-1' });
+    const bump1 = AttachmentState.bumpPreviewGeneration(s); // bat dau probe HEIC goc
+    const heicProbeGeneration = bump1.generation; // = 1
+    s = bump1.state;
+
+    const bump2 = AttachmentState.bumpPreviewGeneration(s); // JPEG da convert xong, chuan bi dat preview moi
+    s = bump2.state; // previewGeneration hien tai = 2
+
+    // Probe HEIC cu (generation 1) hoan tat SAU KHI JPEG (generation 2) da
+    // duoc bat dau - phai bi coi la "khong con hieu luc".
+    assert.equal(AttachmentState.isPreviewStillCurrent(s, 'att-1', heicProbeGeneration), false, 'preview generation cu (probe HEIC) phai bi tu choi sau khi co 1 preview MOI HON (JPEG) cho CUNG attachment');
+    // Preview JPEG (generation 2, MOI NHAT) van con hieu luc.
+    assert.equal(AttachmentState.isPreviewStillCurrent(s, 'att-1', bump2.generation), true);
+});
+
+test('isPreviewStillCurrent(): FALSE khi attachmentId da doi (attachment A bi thay bang B) DU previewGeneration co khop', () => {
+    let s = AttachmentState.createAttachmentState();
+    s = AttachmentState.transition(s, PHASES.ATTACHED, { id: 'att-A' });
+    const bumpA = AttachmentState.bumpPreviewGeneration(s);
+    // Nguoi dung xoa A, chon B - attachment MOI bat dau tu previewGeneration=0 lai.
+    let sB = AttachmentState.createAttachmentState();
+    sB = AttachmentState.transition(sB, PHASES.ATTACHED, { id: 'att-B' });
+    const bumpB = AttachmentState.bumpPreviewGeneration(sB);
+    // Cho du generation cua A (1) TRUNG SO voi generation cua B (1), attachmentId
+    // khac nhau nen VAN phai bi tu choi - khong duoc chi dua vao previewGeneration don thuan.
+    assert.equal(bumpA.generation, bumpB.generation, '(gia dinh kiem thu) ca 2 deu la generation dau tien cua rieng chung');
+    assert.equal(AttachmentState.isPreviewStillCurrent(bumpB.state, 'att-A', bumpA.generation), false);
+});
+
+test('isPreviewStillCurrent(): an toan voi input thieu (khong throw)', () => {
+    assert.equal(AttachmentState.isPreviewStillCurrent(null, 'att-1', 1), false);
+    assert.doesNotThrow(() => AttachmentState.isPreviewStillCurrent(undefined, 'att-1', 1));
+});
+
