@@ -386,6 +386,22 @@ Sau 2 lần vá CSP cho `heic2any` (thêm `worker-src`, rồi phát hiện `Eval
 - Video không có preview thumbnail thật (chỉ placeholder "VIDEO") — đơn giản hóa có chủ đích cho hiệu năng mobile, không phải giới hạn kỹ thuật.
 - `heicClientConversionKnownBroken` chỉ tồn tại trong bộ nhớ phiên hiện tại (mất khi tải lại trang) — không lưu vào localStorage, nên sau khi reload trang, lần thử HEIC đầu tiên vẫn sẽ thử `heic2any` lại (chấp nhận được — tránh phức tạp hóa việc lưu trạng thái không quan trọng).
 
+### FIX #2 (2026-09-14, cùng ngày) — Preview quá nhỏ, chuyển COMPLETED quá nhanh, race điều kiện preview HEIC
+
+3 vấn đề phát hiện sau khi dùng thử bản redesign ở trên:
+
+**1. Preview quá nhỏ (64×64, giống icon hơn là preview).** Đổi `.attachment-preview-wrap` sang panel thật: `aspect-ratio: 4/3`, `max-width: 260px` (desktop), `min(100%, 240px)` (mobile, qua media query `max-width: 420px`) — nằm đúng trong khoảng 200–260px rộng / 150–200px cao yêu cầu. Card đổi từ layout ngang (thumbnail + info cạnh nhau) sang dọc (preview lớn phía trên, tên file/trạng thái phía dưới) để giữ đúng tỷ lệ mà không bóp méo. Spinner/progress text phóng to tương ứng (56px, 0.95rem) cho cân đối với panel lớn hơn.
+
+**2. `COMPLETED → IDLE` xảy ra trong cùng 1 tick đồng bộ — hiệu ứng mờ→nét không bao giờ được nhìn thấy.** Trước đó code gọi `setAttachmentPhase(COMPLETED)` rồi `setAttachmentPhase(IDLE)` liên tiếp không có `await` ở giữa — trình duyệt không có cơ hội render frame nào ở trạng thái COMPLETED trước khi card đã bị ẩn. Sửa lại đúng trình tự: `COMPLETED` → đợi 2 lần `requestAnimationFrame` lồng nhau (đảm bảo frame kế tiếp thực sự đã vẽ xong, không chỉ "trước frame này") → render tin nhắn chat thật (bubble độc lập, không cần đợi hiệu ứng CSS của card) → đợi thêm `ATTACHMENT_COMPLETED_VISIBLE_MS = 400ms` (khớp với thời lượng CSS transition 350ms của `.attachment-preview-img`, cộng biên an toàn nhỏ) → **lúc này mới** revoke object URL và chuyển `IDLE` (ẩn card). Object URL không bao giờ bị revoke trước khi hiệu ứng có cơ hội chạy hết. Mỗi bước chờ đều kiểm tra lại `isStaleAttachmentResult()` — nếu người dùng bấm Xóa/chọn file khác trong lúc đang chờ hiệu ứng, `cancelAttachment()` đã tự lo phần dọn dẹp của nó, đoạn code này không đụng vào nữa (tránh dọn dẹp trùng hoặc đè lên attachment mới).
+
+**3. Race điều kiện preview HEIC: probe hiển thị HEIC gốc có thể hoàn tất SAU và ghi đè preview JPEG đã convert xong trước đó.** `attachmentId` (đã có từ bản redesign) chỉ bảo vệ được giữa 2 *attachment* khác nhau, không bảo vệ được giữa 2 *lần set preview* cho CÙNG 1 attachment (ví dụ: probe hiển thị trực tiếp HEIC gốc, và sau đó preview JPEG từ `heic2any` — cả hai đều thuộc về cùng 1 `attachmentId`). Thêm `previewGeneration` (đếm trong `attachment-state.js`, tăng qua `bumpPreviewGeneration()` mỗi khi bắt đầu 1 thao tác set-preview bất đồng bộ mới) và `isPreviewStillCurrent()` (kiểm tra **cả** `attachmentId` **lẫn** `previewGeneration` cùng khớp) — callback nào có generation cũ hơn generation hiện tại của chính attachment đó sẽ tự nhận ra mình đã "lạc hậu", revoke object URL riêng của nó và bỏ qua, không đụng vào preview mới hơn.
+
+Không đổi: kiến trúc upload HEIC, `heic-convert` phía server, CSP (không thêm `unsafe-eval`), authentication/authorization, WebSocket, PostgreSQL, encryption, retention, `xhr.upload.onprogress` (vẫn dùng progress thật, không giả lập), database schema.
+
+Test mới trong `test/attachment-state.test.js` (nay 23 test, +5 so với bản trước): `bumpPreviewGeneration()` tăng đúng và không mutate input; `isPreviewStillCurrent()` đúng cho kịch bản chính xác nêu trong yêu cầu (probe HEIC cũ bị preview JPEG mới hơn "vượt mặt" phải bị từ chối); phân biệt đúng giữa "khác attachment" và "cùng attachment nhưng khác generation". Toàn bộ 23 test PASS trong sandbox này (không cần trình duyệt/DB).
+
+**Known limitation không đổi từ bản trước**: phần UI/DOM/animation (kích thước preview thực tế trên màn hình, thời lượng hiệu ứng mờ→nét có thực sự mượt hay không, layout mobile) **vẫn không có test tự động** — dự án chưa có hạ tầng test trình duyệt và việc thêm hạ tầng đó chỉ cho tính năng này vượt phạm vi yêu cầu. Khuyến nghị kiểm thử thủ công (như đã liệt kê chi tiết trong yêu cầu gốc — JPG, HEIC, race điều kiện bằng mạng chậm, hủy, thay thế file) trên trình duyệt thật, đặc biệt Android, trước khi coi tính năng đã được xác minh đầy đủ.
+
 ## Lưu ý quan trọng
 
 
