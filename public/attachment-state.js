@@ -27,6 +27,15 @@
         CONVERTING: 'CONVERTING',
         READY_TO_UPLOAD: 'READY_TO_UPLOAD',
         UPLOADING: 'UPLOADING',
+        // FIX #3: "UPLOADING" (xhr.upload.onprogress dat 100%) CHI co nghia la
+        // trinh duyet da GUI XONG toan bo request body - KHONG co nghia la
+        // server da xu ly xong (validate/HEIC-convert/ma hoa/ghi DB/tra ve
+        // response). Truoc day UI dong nhat 2 khai niem nay, khien nguoi dung
+        // thay "100% Dang tai len..." dung yen vo han trong khi server (dac
+        // biet dang convert HEIC, co the mat vai giay) van dang xu ly - UI
+        // trong "ket" cho toi khi nguoi dung tu refresh trang. Them giai doan
+        // rieng cho khoang thoi gian "da gui xong, dang cho server tra loi".
+        SERVER_PROCESSING: 'SERVER_PROCESSING',
         COMPLETED: 'COMPLETED',
         FAILED: 'FAILED',
         CANCELLED: 'CANCELLED',
@@ -40,7 +49,14 @@
         ATTACHED: [PHASES.CONVERTING, PHASES.READY_TO_UPLOAD, PHASES.CANCELLED, PHASES.FAILED],
         CONVERTING: [PHASES.READY_TO_UPLOAD, PHASES.FAILED, PHASES.CANCELLED],
         READY_TO_UPLOAD: [PHASES.UPLOADING, PHASES.CANCELLED, PHASES.FAILED],
-        UPLOADING: [PHASES.COMPLETED, PHASES.FAILED, PHASES.CANCELLED],
+        // UPLOADING -> COMPLETED truc tiep VAN duoc giu (khong bo) - phong
+        // truong hop trinh duyet KHONG bao gio ban ra su kien onprogress=100%
+        // dang tin cay (hiem nhung co the xay ra tren 1 so trinh duyet cu/mang
+        // la) va "xhr.onload" (hoan tat HTTP that su) den truoc khi ta kip dat
+        // SERVER_PROCESSING - luc do van phai di thang duoc toi COMPLETED,
+        // khong duoc ket lai chi vi thieu 1 buoc trung gian (xem §7/§8).
+        UPLOADING: [PHASES.SERVER_PROCESSING, PHASES.COMPLETED, PHASES.FAILED, PHASES.CANCELLED],
+        SERVER_PROCESSING: [PHASES.COMPLETED, PHASES.FAILED, PHASES.CANCELLED],
         COMPLETED: [PHASES.IDLE], // don dep xong -> san sang cho attachment moi
         FAILED: [PHASES.IDLE, PHASES.ATTACHED, PHASES.CONVERTING, PHASES.READY_TO_UPLOAD, PHASES.CANCELLED], // cho phep retry
         CANCELLED: [PHASES.IDLE],
@@ -52,13 +68,14 @@
         return allowed.indexOf(to) !== -1;
     }
 
-    // Cac giai doan ma nut "Gui" PHAI bi vo hieu hoa (dang xu ly/dang tai len -
-    // yeu cau task §9: "While attachment is CONVERTING/UPLOADING: disable the
-    // Send button"). COMPLETED/CANCELLED/IDLE/FAILED/ATTACHED/READY_TO_UPLOAD
-    // deu KHONG chan Send (ATTACHED/READY_TO_UPLOAD la trang thai "san sang",
+    // Cac giai doan ma nut "Gui" PHAI bi vo hieu hoa (dang xu ly/dang tai len/
+    // dang cho server xu ly - yeu cau task §9 (FIX ban dau) + §20 (FIX #3):
+    // "During UPLOADING, SERVER_PROCESSING the Send button must remain
+    // disabled"). COMPLETED/CANCELLED/IDLE/FAILED/ATTACHED/READY_TO_UPLOAD deu
+    // KHONG chan Send (ATTACHED/READY_TO_UPLOAD la trang thai "san sang",
     // FAILED cho phep nguoi dung thu lai hoac go bo dinh kem roi gui text binh
     // thuong).
-    var SEND_BLOCKING_PHASES = [PHASES.CONVERTING, PHASES.UPLOADING];
+    var SEND_BLOCKING_PHASES = [PHASES.CONVERTING, PHASES.UPLOADING, PHASES.SERVER_PROCESSING];
     function isSendBlockedByAttachment(phase) {
         return SEND_BLOCKING_PHASES.indexOf(phase) !== -1;
     }

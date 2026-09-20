@@ -75,15 +75,53 @@ async function api(path, opts = {}) {
 // lieu - yeu cau §10: "Do NOT pretend fetch() upload progress is available if
 // it is not"). Tra ve ca Promise KET QUA lan tham chieu "xhr" (qua onXhrCreated)
 // de noi goi co the abort() giua chung (huy dinh kem trong luc dang tai len).
-function uploadAttachmentWithProgress(path, file, replyToId, { onProgress, onXhrCreated } = {}) {
+//
+// FIX #3: PHAN BIET RO 2 khai niem khac nhau ma truoc day bi nham la 1:
+//   A) "xhr.upload.onprogress" bao 100% - CHI co nghia trinh duyet da GUI
+//      XONG toan bo request body qua mang. Server co the VAN DANG xu ly
+//      (validate/HEIC-convert/ma hoa/ghi DB/dung response) - dac biet voi
+//      HEIC fallback, buoc nay co the mat vai giay (server chay heic-convert).
+//   B) "xhr.onload" - moc hoan tat THAT SU (server DA tra ve HTTP response).
+// Truoc day UI dung "progress===100%" lam dieu kien hoan tat -> hien
+// "100% Dang tai len..." dung yen vo han trong luc server van dang xu ly,
+// nguoi dung tuong bi "ket" va phai tu refresh trang (bug goc cua FIX #3).
+// Ham nay them callback "onServerProcessing()" duoc goi CHINH XAC 1 LAN
+// (dung "serverProcessingStarted" de chan goi lai) tai THOI DIEM SOM NHAT co
+// the xac dinh "trinh duyet da gui xong" - uu tien qua su kien progress=100%,
+// nhung neu trinh duyet KHONG bao gio ban su kien do mot cach dang tin cay
+// (hiem gap, nhung co the xay ra), "xhr.onload" tu no cung goi callback nay
+// TRUOC KHI xu ly response, dam bao UI luon duoc chuyen sang SERVER_PROCESSING
+// truoc khi vao COMPLETED/FAILED, bat ke duong nao xay ra truoc (§7/§8).
+function uploadAttachmentWithProgress(path, file, replyToId, { onProgress, onServerProcessing, onXhrCreated } = {}) {
   return new Promise((resolve, reject) => {
+    let serverProcessingStarted = false;
+    function markServerProcessingStarted() {
+      if (serverProcessingStarted) return;
+      serverProcessingStarted = true;
+      if (onServerProcessing) onServerProcessing();
+    }
+
     const xhr = new XMLHttpRequest();
     xhr.open('POST', path);
     if (state.token) xhr.setRequestHeader('Authorization', 'Bearer ' + state.token);
+    // Khong dat "xhr.timeout" (mac dinh 0 = khong gioi han) - CHU DICH, KHONG
+    // PHAI thieu sot: HEIC fallback co the can toi HEIC_CONVERT_TIMEOUT_MS
+    // (server.js, ~15s) + thoi gian upload + overhead mang; 1 timeout ngan o
+    // phia client se tao that bai GIA trong khi server van dang xu ly binh
+    // thuong (dung y §15: "Do NOT implement an arbitrary short timeout").
     xhr.upload.onprogress = (evt) => {
-      if (evt.lengthComputable && onProgress) onProgress(Math.round((evt.loaded / evt.total) * 100));
+      if (!evt.lengthComputable) return;
+      const percent = Math.round((evt.loaded / evt.total) * 100);
+      if (onProgress) onProgress(percent);
+      if (percent >= 100) markServerProcessingStarted();
     };
     xhr.onload = () => {
+      // Luoi an toan: neu vi ly do gi do su kien onprogress=100% khong tung
+      // ban ra (hiem), "xhr.onload" (moc hoan tat HTTP THAT SU) van dam bao
+      // UI da duoc chuyen sang SERVER_PROCESSING truoc khi xu ly ket qua -
+      // khong bao gio nhay thang tu UPLOADING (dang hien % < 100) sang
+      // COMPLETED/FAILED ma bo qua giai doan trung gian.
+      markServerProcessingStarted();
       let data = {};
       try { data = JSON.parse(xhr.responseText); } catch { /* body rong/khong phai JSON */ }
       if (xhr.status === 401) { logout(false); reject(Object.assign(new Error('unauthorized'), { status: 401 })); return; }
@@ -873,9 +911,11 @@ function renderAttachmentPreview() {
     attachmentPlaceholderLabel.textContent = att.kind === 'heic' ? 'HEIC' : att.kind === 'video' ? 'VIDEO' : '📎';
   }
 
-  // Overlay (spinner vo dinh khi CONVERTING, tien do so khi UPLOADING) - xem
-  // §10/§11: "khong bia % conversion gia - dung spinner vo dinh".
-  if (att.phase === PHASES.CONVERTING) {
+  // Overlay (spinner vo dinh khi CONVERTING/SERVER_PROCESSING, tien do so khi
+  // UPLOADING) - xem §10/§11 (FIX ban dau) + §9 (FIX #3): "khong bia % xu ly
+  // phia server - dung spinner vo dinh, KHONG hien lai '100%' sau khi da gui
+  // xong request body".
+  if (att.phase === PHASES.CONVERTING || att.phase === PHASES.SERVER_PROCESSING) {
     attachmentOverlay.classList.remove('hidden');
     attachmentSpinnerEl.classList.add('indeterminate');
     attachmentProgressText.textContent = '';
@@ -897,6 +937,10 @@ function renderAttachmentPreview() {
     att.phase === PHASES.CONVERTING ? (att.kind === 'heic' ? 'Đang chuyển đổi...' : 'Đang xử lý ảnh...') :
     att.phase === PHASES.READY_TO_UPLOAD ? 'Sẵn sàng gửi' :
     att.phase === PHASES.UPLOADING ? 'Đang tải lên...' :
+    // FIX #3: rieng biet voi UPLOADING - da gui xong request body (upload=100%),
+    // dang cho SERVER xu ly (validate/HEIC-convert/ma hoa/ghi DB) - KHONG con
+    // hien "Đang tải lên..."/% nua vi dieu do khong con dung (§5/§9).
+    att.phase === PHASES.SERVER_PROCESSING ? 'Đang xử lý trên máy chủ...' :
     att.phase === PHASES.FAILED ? (att.error || 'Xử lý thất bại') + (att.file ? ' (nhấn để thử lại)' : '') :
     att.phase === PHASES.COMPLETED ? 'Hoàn tất' : '';
 }
@@ -1181,6 +1225,14 @@ $('#form-send').addEventListener('submit', async (e) => {
         onProgress: (pct) => {
           if (AttachmentState.isStaleAttachmentResult(state.attachment.id, attachmentId)) return;
           patchAttachment({ progress: pct });
+        },
+        // FIX #3: da gui xong toan bo request body (browser->server) - server
+        // co the VAN DANG xu ly (dac biet HEIC fallback: heic-convert co the
+        // mat vai giay). Chuyen UI sang SERVER_PROCESSING NGAY, KHONG doi tiep
+        // tuc hien "100% Dang tai len..." (dung y §5: do la trang thai SAI).
+        onServerProcessing: () => {
+          if (AttachmentState.isStaleAttachmentResult(state.attachment.id, attachmentId)) return;
+          setAttachmentPhase(PHASES.SERVER_PROCESSING);
         },
         onXhrCreated: (xhr) => {
           // Neu attachment da bi thay doi GIUA LUC tao xhr va luc callback nay
