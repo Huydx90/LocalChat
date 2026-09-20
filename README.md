@@ -402,6 +402,32 @@ Test mới trong `test/attachment-state.test.js` (nay 23 test, +5 so với bản
 
 **Known limitation không đổi từ bản trước**: phần UI/DOM/animation (kích thước preview thực tế trên màn hình, thời lượng hiệu ứng mờ→nét có thực sự mượt hay không, layout mobile) **vẫn không có test tự động** — dự án chưa có hạ tầng test trình duyệt và việc thêm hạ tầng đó chỉ cho tính năng này vượt phạm vi yêu cầu. Khuyến nghị kiểm thử thủ công (như đã liệt kê chi tiết trong yêu cầu gốc — JPG, HEIC, race điều kiện bằng mạng chậm, hủy, thay thế file) trên trình duyệt thật, đặc biệt Android, trước khi coi tính năng đã được xác minh đầy đủ.
 
+### FIX #3 (2026-09-14, cùng ngày) — Tách "đã tải lên xong" khỏi "server đã xử lý xong"
+
+**Bug thực tế quan sát được trên production**: với HEIC fallback (client không convert được, gửi HEIC gốc lên server), sau khi `xhr.upload.onprogress` báo 100%, UI đứng yên ở "100% — Đang tải lên..." trong lúc server chạy `heic-convert` (có thể mất vài giây) — trông như bị "kẹt", người dùng phải tự bấm refresh mới thấy tin nhắn (dù thực ra server đã xử lý xong và lưu thành công từ trước).
+
+**Nguyên nhân**: `xhr.upload.onprogress` báo 100% chỉ có nghĩa là **trình duyệt đã gửi xong** toàn bộ request body — hoàn toàn khác với "server đã xử lý xong". Code cũ đồng nhất 2 khái niệm này.
+
+**Fix**: thêm state mới **`SERVER_PROCESSING`** vào `attachment-state.js`, chen giữa `UPLOADING` và `COMPLETED`:
+```
+UPLOADING → SERVER_PROCESSING → COMPLETED
+```
+(giữ thêm cạnh `UPLOADING → COMPLETED` trực tiếp làm lưới an toàn — phòng trường hợp hiếm trình duyệt không bao giờ bắn sự kiện `progress=100%` đáng tin cậy và `xhr.onload` đến trước khi kịp chuyển qua bước trung gian).
+
+`uploadAttachmentWithProgress()` (`app.js`) có thêm callback `onServerProcessing()`, được gọi **đúng 1 lần** (chặn gọi lặp bằng cờ `serverProcessingStarted`) tại thời điểm sớm nhất xác định được "đã gửi xong": ưu tiên qua sự kiện `progress≥100%`, nhưng `xhr.onload` cũng tự gọi lại (lưới an toàn) ngay trước khi xử lý response, đảm bảo UI luôn kịp chuyển sang `SERVER_PROCESSING` bất kể đường nào đến trước. Đã xác minh logic chặn-gọi-lặp này bằng 1 script mô phỏng độc lập (3 kịch bản: đường bình thường, thiếu sự kiện `progress=100%`, nhiều sự kiện `progress=100%` liên tiếp — cả 3 đều chỉ gọi callback đúng 1 lần) do không thể unit-test trực tiếp 1 hàm phụ thuộc `XMLHttpRequest`/`FormData` (globals chỉ có trong trình duyệt) mà không thêm hạ tầng mock lớn — không đưa vào bộ test chính thức vì lý do tương tự.
+
+UI khi `SERVER_PROCESSING`: giữ preview mờ, spinner vô định (không hiện lại "100%" hay bất kỳ % giả nào), text đổi thành **"Đang xử lý trên máy chủ..."**. Nút Gửi tiếp tục bị khóa (`isSendBlockedByAttachment()` nay chặn cả `SERVER_PROCESSING`), và được mở khóa lại ngay khi vào `COMPLETED` — không cần đợi hết hiệu ứng chuyển tiếp 400ms của FIX #2.
+
+**Không đặt `xhr.timeout` ngắn** — xác nhận code hiện tại vốn không set giá trị này (mặc định `0` = không giới hạn), đúng yêu cầu "không được tạo timeout ngắn giả tạo trong khi server có thể cần tới ~15s cho `HEIC_CONVERT_TIMEOUT_MS`" — không cần sửa gì, chỉ xác nhận + ghi chú lại trong code.
+
+**Không trùng lặp tin nhắn**: xác nhận (không cần sửa) `appendMessage()` đã dedup theo `message.id` qua `state.renderedIds` từ trước — do đó dù response HTTP của chính request upload **và** broadcast WebSocket (gửi tới chính người upload) đều gọi `appendMessage()` với cùng 1 message, chỉ lần gọi đầu tiên thực sự render, lần sau là no-op.
+
+Không đổi: `server.js` (không đụng tới, kiến trúc HEIC/upload/CSP phía server giữ nguyên hoàn toàn), `xhr.upload.onprogress` calculation, endpoint upload, `heic-convert`, `HEIC_CONVERT_TIMEOUT_MS`, database schema, FIX #2's blur→sharp transition/object-URL cleanup/previewGeneration protection (đều được giữ nguyên, chỉ chèn thêm 1 state ở giữa).
+
+Test mới trong `test/attachment-state.test.js` (nay 26 test, +3 so với FIX #2): `UPLOADING → SERVER_PROCESSING → COMPLETED` hợp lệ; `UPLOADING → COMPLETED` trực tiếp vẫn hợp lệ (lưới an toàn); `SERVER_PROCESSING → FAILED`/`CANCELLED` hợp lệ; `isSendBlockedByAttachment` chặn đúng cả 3 phase (CONVERTING/UPLOADING/SERVER_PROCESSING); các bước nhảy không hợp lệ liên quan state mới đều bị từ chối đúng. Toàn bộ 26 test PASS trong sandbox này.
+
+**Known limitation**: cũng như FIX #2, phần hiển thị UI thực tế (text "Đang xử lý trên máy chủ..." có xuất hiện đúng lúc trên màn hình thật, thời gian server xử lý HEIC thực tế trên Render có nằm trong ngưỡng chấp nhận được hay không) **chưa được xác minh trên trình duyệt thật** — chỉ có state machine logic được test. Kịch bản chính xác gây bug ban đầu (HEIC fallback trên Android, mạng chậm) cần được kiểm thử thủ công lại theo đúng "MANUAL TEST" đã liệt kê trong yêu cầu trước khi coi là đã khắc phục hoàn toàn.
+
 ## Lưu ý quan trọng
 
 
