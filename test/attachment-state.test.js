@@ -42,19 +42,25 @@ test('AttachmentState: generateAttachmentId() luon tra ve gia tri duy nhat, dang
 // thanh cong, HEIC that bai/fallback server, huy o moi giai doan, retry).
 // ---------------------------------------------------------------------
 
-test('isValidTransition: luong JPG (khong can convert) - ATTACHED -> READY_TO_UPLOAD -> UPLOADING -> COMPLETED', () => {
+test('isValidTransition: luong JPG (khong can convert) - ATTACHED -> READY_TO_UPLOAD -> UPLOADING -> SERVER_PROCESSING -> COMPLETED', () => {
     assert.equal(AttachmentState.isValidTransition(PHASES.IDLE, PHASES.ATTACHED), true);
     assert.equal(AttachmentState.isValidTransition(PHASES.ATTACHED, PHASES.READY_TO_UPLOAD), true);
     assert.equal(AttachmentState.isValidTransition(PHASES.READY_TO_UPLOAD, PHASES.UPLOADING), true);
-    assert.equal(AttachmentState.isValidTransition(PHASES.UPLOADING, PHASES.COMPLETED), true);
+    assert.equal(AttachmentState.isValidTransition(PHASES.UPLOADING, PHASES.SERVER_PROCESSING), true);
+    assert.equal(AttachmentState.isValidTransition(PHASES.SERVER_PROCESSING, PHASES.COMPLETED), true);
     assert.equal(AttachmentState.isValidTransition(PHASES.COMPLETED, PHASES.IDLE), true);
 });
 
-test('isValidTransition: luong HEIC convert client THANH CONG - ATTACHED -> CONVERTING -> READY_TO_UPLOAD -> UPLOADING -> COMPLETED', () => {
+test('isValidTransition: UPLOADING -> COMPLETED TRUC TIEP van hop le (luoi an toan neu trinh duyet khong bao gio ban su kien onprogress=100% dang tin cay va xhr.onload den truoc)', () => {
+    assert.equal(AttachmentState.isValidTransition(PHASES.UPLOADING, PHASES.COMPLETED), true, 'FIX #3 §7/§8: khong duoc bat buoc phai di qua SERVER_PROCESSING neu phan hoi HTTP den truoc khi kip dat giai doan trung gian');
+});
+
+test('isValidTransition: luong HEIC convert client THANH CONG - ATTACHED -> CONVERTING -> READY_TO_UPLOAD -> UPLOADING -> SERVER_PROCESSING -> COMPLETED', () => {
     assert.equal(AttachmentState.isValidTransition(PHASES.ATTACHED, PHASES.CONVERTING), true);
     assert.equal(AttachmentState.isValidTransition(PHASES.CONVERTING, PHASES.READY_TO_UPLOAD), true);
     assert.equal(AttachmentState.isValidTransition(PHASES.READY_TO_UPLOAD, PHASES.UPLOADING), true);
-    assert.equal(AttachmentState.isValidTransition(PHASES.UPLOADING, PHASES.COMPLETED), true);
+    assert.equal(AttachmentState.isValidTransition(PHASES.UPLOADING, PHASES.SERVER_PROCESSING), true);
+    assert.equal(AttachmentState.isValidTransition(PHASES.SERVER_PROCESSING, PHASES.COMPLETED), true);
 });
 
 test('isValidTransition: luong HEIC convert client THAT BAI (CSP/timeout/unavailable) van phai toi duoc READY_TO_UPLOAD (fallback HEIC goc len server)', () => {
@@ -65,11 +71,26 @@ test('isValidTransition: luong HEIC convert client THAT BAI (CSP/timeout/unavail
     assert.equal(AttachmentState.isValidTransition(PHASES.CONVERTING, PHASES.READY_TO_UPLOAD), true, 'CONVERTING that bai van phai fallback duoc sang READY_TO_UPLOAD (gui HEIC goc)');
 });
 
-test('isValidTransition: huy (CANCELLED) hop le tu MOI giai doan dang xu ly (ATTACHED/CONVERTING/READY_TO_UPLOAD/UPLOADING)', () => {
+test('isValidTransition: FIX #3 - luong HEIC fallback (server tu convert) DAY DU: UPLOADING -> SERVER_PROCESSING (dung luc server dang chay heic-convert, co the mat vai giay) -> COMPLETED', () => {
+    // Day CHINH LA kich ban tung bi loi trong thuc te (bug goc cua FIX #3):
+    // HEIC fallback len server -> upload 100% -> UI truoc day "ket" o
+    // "100% Dang tai len..." trong luc server dang chay heic-convert. Xac
+    // nhan state machine gio co giai doan rieng cho khoang thoi gian do.
+    assert.equal(AttachmentState.isValidTransition(PHASES.UPLOADING, PHASES.SERVER_PROCESSING), true);
+    assert.equal(AttachmentState.isValidTransition(PHASES.SERVER_PROCESSING, PHASES.COMPLETED), true);
+});
+
+test('isValidTransition: SERVER_PROCESSING -> FAILED (HTTP 4xx/5xx tu server) va -> CANCELLED (nguoi dung huy trong luc cho server xu ly)', () => {
+    assert.equal(AttachmentState.isValidTransition(PHASES.SERVER_PROCESSING, PHASES.FAILED), true);
+    assert.equal(AttachmentState.isValidTransition(PHASES.SERVER_PROCESSING, PHASES.CANCELLED), true);
+});
+
+test('isValidTransition: huy (CANCELLED) hop le tu MOI giai doan dang xu ly (ATTACHED/CONVERTING/READY_TO_UPLOAD/UPLOADING/SERVER_PROCESSING)', () => {
     assert.equal(AttachmentState.isValidTransition(PHASES.ATTACHED, PHASES.CANCELLED), true);
     assert.equal(AttachmentState.isValidTransition(PHASES.CONVERTING, PHASES.CANCELLED), true);
     assert.equal(AttachmentState.isValidTransition(PHASES.READY_TO_UPLOAD, PHASES.CANCELLED), true);
     assert.equal(AttachmentState.isValidTransition(PHASES.UPLOADING, PHASES.CANCELLED), true);
+    assert.equal(AttachmentState.isValidTransition(PHASES.SERVER_PROCESSING, PHASES.CANCELLED), true);
     assert.equal(AttachmentState.isValidTransition(PHASES.CANCELLED, PHASES.IDLE), true);
 });
 
@@ -86,6 +107,10 @@ test('isValidTransition: TU CHOI cac buoc nhay khong hop le (bo qua giai doan, d
     assert.equal(AttachmentState.isValidTransition(PHASES.COMPLETED, PHASES.UPLOADING), false, 'da COMPLETED khong the quay lai UPLOADING');
     assert.equal(AttachmentState.isValidTransition(PHASES.CANCELLED, PHASES.UPLOADING), false);
     assert.equal(AttachmentState.isValidTransition('KHONG_TON_TAI', PHASES.IDLE), false, 'phase khong ton tai phai tra ve false, khong throw');
+    assert.equal(AttachmentState.isValidTransition(PHASES.IDLE, PHASES.SERVER_PROCESSING), false, 'khong duoc nhay thang tu IDLE toi SERVER_PROCESSING');
+    assert.equal(AttachmentState.isValidTransition(PHASES.READY_TO_UPLOAD, PHASES.SERVER_PROCESSING), false, 'phai di qua UPLOADING truoc, khong duoc bo qua');
+    assert.equal(AttachmentState.isValidTransition(PHASES.SERVER_PROCESSING, PHASES.UPLOADING), false, 'khong duoc lui tu SERVER_PROCESSING ve UPLOADING');
+    assert.equal(AttachmentState.isValidTransition(PHASES.COMPLETED, PHASES.SERVER_PROCESSING), false);
 });
 
 // ---------------------------------------------------------------------
@@ -142,9 +167,10 @@ test('transition(): mo phong DAY DU 1 luong HEIC that bai roi fallback thanh con
 // isSendBlockedByAttachment - nut "Gui" chi bi khoa dung luc CONVERTING/UPLOADING
 // ---------------------------------------------------------------------
 
-test('isSendBlockedByAttachment: CHI khoa Send trong luc CONVERTING hoac UPLOADING', () => {
+test('isSendBlockedByAttachment: khoa Send trong luc CONVERTING, UPLOADING, hoac SERVER_PROCESSING', () => {
     assert.equal(AttachmentState.isSendBlockedByAttachment(PHASES.CONVERTING), true);
     assert.equal(AttachmentState.isSendBlockedByAttachment(PHASES.UPLOADING), true);
+    assert.equal(AttachmentState.isSendBlockedByAttachment(PHASES.SERVER_PROCESSING), true, 'FIX #3: khong duoc cho phep Gui trong luc dang cho server tra loi (sau khi da upload xong 100%)');
 });
 
 test('isSendBlockedByAttachment: KHONG khoa Send o cac giai doan khac (IDLE/ATTACHED/READY_TO_UPLOAD/COMPLETED/FAILED/CANCELLED)', () => {
